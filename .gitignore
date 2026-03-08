@@ -1,2 +1,4 @@
 # Large datasets (excluded from version control)
 data/MI1/*
+data/MI1_partial/*
+models/checkpoints_MI1/*
