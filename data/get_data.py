@@ -239,7 +239,7 @@ def download_mi2_bci2a(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out_dir", type=str, default="./date", help="output root dir")
+    parser.add_argument("--out_dir", type=str, default=".", help="output root dir")
     parser.add_argument("--which", type=str, default="MI1,MI2", help="MI1, MI2, or MI1,MI2")
     parser.add_argument("--resample", type=int, default=128)
     parser.add_argument("--fmin", type=float, default=4.0)
