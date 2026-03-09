@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 from dataclasses import asdict
 from pathlib import Path
@@ -15,7 +14,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader, random_split
 
 from eegnet import EEGNetConfig, EEGNetMI1MI2
-from eval_bca_uia import evaluate_bca_uia
+from eval_metrics import evaluate_metrics
 
 
 # =========================
@@ -24,11 +23,10 @@ from eval_bca_uia import evaluate_bca_uia
 class MI1Dataset(Dataset):
     """
     Load all .mat files in MI1 directory.
-    Each file corresponds to one subject/session.
+    Each file is treated as one user/domain unit.
     """
 
     def __init__(self, mi1_dir: str):
-
         mi1_dir = Path(mi1_dir)
         mat_files = sorted(mi1_dir.glob("*.mat"))
 
@@ -39,31 +37,35 @@ class MI1Dataset(Dataset):
         y_all = []
         user_all = []
 
-        for mat_idx, mi1_dir in enumerate(mat_files):
+        print("Loaded mat files:")
+        for f in mat_files:
+            print(" ", f.name)
 
-            data = scio.loadmat(mi1_dir)
+        for mat_idx, mat_path in enumerate(mat_files):
+            data = scio.loadmat(mat_path)
 
             X = data["X"]
             y_task = np.asarray(data["y"]).squeeze()
-            y_user = np.asarray(data["group"]).squeeze()
+            y_user = np.asarray(data["group"]).squeeze()  # 这里只做一致性检查
 
-            # sanity check
             if not (X.shape[0] == len(y_task) == len(y_user)):
-                raise ValueError(f"Mismatch in {mi1_dir}")
+                raise ValueError(f"Mismatch in {mat_path}")
 
             X_all.append(X)
             y_all.append(y_task)
 
-            # user id 重新编码（避免不同文件 group 重复）
-            user_all.append(
-                np.full_like(y_task, mat_idx)
-            )
+            # 这里把“文件编号”作为用户标签，避免不同文件里的 group 编号重复
+            user_all.append(np.full(len(y_task), mat_idx, dtype=np.int64))
 
         X_all = np.concatenate(X_all, axis=0)
         y_all = np.concatenate(y_all, axis=0)
         user_all = np.concatenate(user_all, axis=0)
 
-        # 转 tensor
+        # 若任务标签不是从0开始，重映射到 0...K-1
+        uniq_task = sorted(np.unique(y_all).tolist())
+        task_map = {v: i for i, v in enumerate(uniq_task)}
+        y_all = np.array([task_map[v] for v in y_all], dtype=np.int64)
+
         self.x = torch.tensor(X_all, dtype=torch.float32)
         self.y_task = torch.tensor(y_all, dtype=torch.long)
         self.y_user = torch.tensor(user_all, dtype=torch.long)
@@ -71,11 +73,10 @@ class MI1Dataset(Dataset):
         self.n_samples = self.x.shape[0]
         self.n_channels = self.x.shape[1]
         self.n_times = self.x.shape[2]
+        self.n_task_classes = int(torch.unique(self.y_task).numel())
+        self.n_users = int(torch.unique(self.y_user).numel())
 
-        self.n_task_classes = len(torch.unique(self.y_task))
-        self.n_users = len(torch.unique(self.y_user))
-
-        print("Dataset loaded:")
+        print("\nDataset loaded:")
         print("samples:", self.n_samples)
         print("channels:", self.n_channels)
         print("times:", self.n_times)
@@ -86,11 +87,9 @@ class MI1Dataset(Dataset):
         return self.n_samples
 
     def __getitem__(self, idx):
-        return (
-            self.x[idx],
-            self.y_task[idx],
-            self.y_user[idx]
-        )
+        return self.x[idx], self.y_task[idx], self.y_user[idx]
+
+
 # =========================
 # 2) Utils
 # =========================
@@ -236,13 +235,13 @@ def validate_one_epoch(
         total_task_loss += loss_task.item() * bs
         total_user_loss += loss_user.item() * bs
 
-    loss_stats = {
+    stats = {
         "loss": total_loss / total_samples,
         "task_loss": total_task_loss / total_samples,
         "user_loss": total_user_loss / total_samples,
     }
 
-    metric_stats = evaluate_bca_uia(
+    metric_stats = evaluate_metrics(
         model,
         dataloader,
         n_task_classes=n_task_classes,
@@ -250,9 +249,10 @@ def validate_one_epoch(
         amp=False,
     )
 
-    loss_stats["bca"] = metric_stats.bca
-    loss_stats["uia"] = metric_stats.uia
-    return loss_stats
+    stats["mi_acc"] = metric_stats.mi_acc
+    stats["user_acc"] = metric_stats.user_acc
+    stats["bca"] = metric_stats.bca
+    return stats
 
 
 # =========================
@@ -260,7 +260,7 @@ def validate_one_epoch(
 # =========================
 def main():
     parser = argparse.ArgumentParser(description="Train EEGNet on MI1 with task+user loss")
-    parser.add_argument("--mi1_dir",type=str,default="../data/MI1_partial",help="Directory containing MI1 .mat files")
+    parser.add_argument("--mi1_dir", type=str, default="../data/MI1_partial", help="Directory containing MI1 .mat files")
     parser.add_argument("--save_root", type=str, default="./checkpoints_MI1", help="Root dir for runs")
     parser.add_argument("--run_name", type=str, default=None, help="Name of this run")
     parser.add_argument("--epochs", type=int, default=100)
@@ -279,10 +279,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- dataset ----
-    ds = MI1Dataset("../data/MI1_partial")
+    ds = MI1Dataset(args.mi1_dir)
 
-    print("=== Dataset Summary ===")
-    print(f"mi1_dir         : {args.mi1_dir}")
+    print("\n=== Dataset Summary ===")
+    print(f"mi1_dir          : {args.mi1_dir}")
     print(f"n_samples        : {ds.n_samples}")
     print(f"n_channels       : {ds.n_channels}")
     print(f"n_times          : {ds.n_times}")
@@ -360,7 +360,7 @@ def main():
     save_json(config_to_save, run_dir / "config.json")
 
     best_val_loss = float("inf")
-    best_val_bca = -1.0
+    best_val_mi_acc = -1.0
     history = []
 
     for epoch in range(1, args.epochs + 1):
@@ -388,8 +388,9 @@ def main():
             "val_loss": val_stats["loss"],
             "val_task_loss": val_stats["task_loss"],
             "val_user_loss": val_stats["user_loss"],
+            "val_mi_acc": val_stats["mi_acc"],
+            "val_user_acc": val_stats["user_acc"],
             "val_bca": val_stats["bca"],
-            "val_uia": val_stats["uia"],
         }
         history.append(row)
 
@@ -399,8 +400,9 @@ def main():
             f"(task={row['train_task_loss']:.4f}, user={row['train_user_loss']:.4f}) | "
             f"val_loss={row['val_loss']:.4f} "
             f"(task={row['val_task_loss']:.4f}, user={row['val_user_loss']:.4f}) | "
-            f"val_BCA={row['val_bca'] * 100:.2f}% | "
-            f"val_UIA={row['val_uia'] * 100:.2f}%"
+            f"val_MI_ACC={row['val_mi_acc'] * 100:.2f}% | "
+            f"val_USER_ACC={row['val_user_acc'] * 100:.2f}% | "
+            f"val_BCA={row['val_bca'] * 100:.2f}%"
         )
 
         extra = {
@@ -409,7 +411,6 @@ def main():
             "dataset_type": "MI1",
         }
 
-        # latest
         save_checkpoint(
             path=run_dir / "latest.pth",
             model=model,
@@ -420,7 +421,6 @@ def main():
             extra=extra,
         )
 
-        # periodic
         if args.save_every > 0 and epoch % args.save_every == 0:
             save_checkpoint(
                 path=run_dir / f"epoch_{epoch:03d}.pth",
@@ -432,7 +432,6 @@ def main():
                 extra=extra,
             )
 
-        # best by val loss
         if row["val_loss"] < best_val_loss:
             best_val_loss = row["val_loss"]
             save_checkpoint(
@@ -446,11 +445,10 @@ def main():
             )
             print("  -> saved best_by_val_loss.pth")
 
-        # best by val BCA
-        if row["val_bca"] > best_val_bca:
-            best_val_bca = row["val_bca"]
+        if row["val_mi_acc"] > best_val_mi_acc:
+            best_val_mi_acc = row["val_mi_acc"]
             save_checkpoint(
-                path=run_dir / "best_by_bca.pth",
+                path=run_dir / "best_by_mi_acc.pth",
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
@@ -458,7 +456,7 @@ def main():
                 cfg=cfg,
                 extra=extra,
             )
-            print("  -> saved best_by_bca.pth")
+            print("  -> saved best_by_mi_acc.pth")
 
         save_json({"history": history}, run_dir / "history.json")
 
@@ -467,7 +465,7 @@ def main():
     print("Saved checkpoints:")
     print(f"  - {run_dir / 'latest.pth'}")
     print(f"  - {run_dir / 'best_by_val_loss.pth'}")
-    print(f"  - {run_dir / 'best_by_bca.pth'}")
+    print(f"  - {run_dir / 'best_by_mi_acc.pth'}")
     if args.save_every > 0:
         print(f"  - periodic epoch_XXX.pth files every {args.save_every} epochs")
 
