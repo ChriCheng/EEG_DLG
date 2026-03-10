@@ -219,11 +219,9 @@ def download_mi1_physionet(
     seed: int,
 ):
     """
-    Paper MI1:
-    - 109 users
-    - 64 channels
-    - Task2: left vs right fist imagery
-    - 3 sessions
+    MI1 from PhysioNet:
+    - keep only imagined left/right fist runs: original run 4, 8, 12
+    - then map runs to 0, 1, 2
     """
     set_seed(seed)
 
@@ -241,15 +239,16 @@ def download_mi1_physionet(
     )
 
     os.makedirs(out_root, exist_ok=True)
-
     expected_samples = int(round((tmax - tmin) * resample)) + 1
+
+    skipped_ok = []
+    redownloaded = []
+    bad_subjects = []
+    saved_ok = []
 
     for idx, subj in enumerate(subjects, start=1):
         out_file = os.path.join(out_root, f"{subj}.mat")
 
-        # -----------------------------
-        # 已存在文件：先校验
-        # -----------------------------
         if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
             ok, reason = validate_saved_mat(
                 out_file,
@@ -262,9 +261,11 @@ def download_mi1_physionet(
             )
             if ok:
                 print(f"[skip] MI1 subject {subj}: {out_file}")
+                skipped_ok.append(subj)
                 continue
             else:
                 print(f"[redownload] MI1 subject {subj}: bad existing file -> {reason}")
+                redownloaded.append(subj)
                 try:
                     os.remove(out_file)
                 except OSError:
@@ -272,61 +273,102 @@ def download_mi1_physionet(
 
         print(f"[MI1] Downloading subject {subj} ({idx}/{len(subjects)}) ...")
 
-        X, y, metadata = paradigm.get_data(dataset=dataset, subjects=[subj])
-        y = np.asarray(y).reshape(-1)
+        try:
+            X, y, metadata = paradigm.get_data(dataset=dataset, subjects=[subj])
+            y = np.asarray(y).reshape(-1)
 
-        # 只保留左右手 trials
-        keep = np.isin(y, ["left_hand", "right_hand"])
-        X = X[keep]
-        y = y[keep]
-        metadata = metadata.iloc[np.where(keep)[0]].reset_index(drop=True)
+            if "run" not in metadata.columns:
+                raise RuntimeError("metadata does not contain 'run' column")
 
-        # 字符串标签 -> 整数标签
-        label_map = {
-            "left_hand": 0,
-            "right_hand": 1,
-        }
-        y = np.array([label_map[v] for v in y], dtype=np.int64)
+            # 调试信息：先看看原始 run
+            raw_runs = sorted(metadata["run"].astype(str).unique().tolist())
+            print(f"  raw unique runs: {raw_runs}")
 
-        # run 强制重新编码成 0/1/2，避免不同版本 MOABB 保存成 4/8/12
-        if "run" in metadata.columns:
-            uniq_runs = sorted(metadata["run"].astype(str).unique().tolist())
-            run_map = {r: i for i, r in enumerate(uniq_runs)}
+            # -----------------------------
+            # 1) 只保留原始 imagined left/right runs: 4, 8, 12
+            # -----------------------------
+            keep_run = metadata["run"].astype(str).isin(["4", "8", "12"]).to_numpy()
+
+            # -----------------------------
+            # 2) 只保留 left/right labels
+            # -----------------------------
+            keep_label = np.isin(y, ["left_hand", "right_hand"])
+
+            keep = keep_run & keep_label
+
+            X = X[keep]
+            y = y[keep]
+            metadata = metadata.iloc[np.where(keep)[0]].reset_index(drop=True)
+
+            # -----------------------------
+            # 3) 标签转整数
+            # -----------------------------
+            label_map = {
+                "left_hand": 0,
+                "right_hand": 1,
+            }
+            y = np.array([label_map[v] for v in y], dtype=np.int64)
+
+            # -----------------------------
+            # 4) 原始 run 4/8/12 -> 0/1/2
+            # -----------------------------
+            run_map = {"4": 0, "8": 1, "12": 2}
             metadata["run"] = metadata["run"].astype(str).map(run_map).astype(np.int64)
 
-        # session 若存在，也同步成 0/1/2；若不存在，可选地用 run 补
-        if "session" in metadata.columns:
-            uniq_sessions = sorted(metadata["session"].astype(str).unique().tolist())
-            sess_map = {s: i for i, s in enumerate(uniq_sessions)}
-            metadata["session"] = (
-                metadata["session"].astype(str).map(sess_map).astype(np.int64)
-            )
-        else:
+            # session 与 run 保持一致
             metadata["session"] = metadata["run"].astype(np.int64)
 
-        print(
-            "  filtered X:", X.shape,
-            "y:", y.shape,
-            "meta cols:", list(metadata.columns)
-        )
+            print(
+                "  filtered X:", X.shape,
+                "y:", y.shape,
+                "meta cols:", list(metadata.columns)
+            )
+            print(
+                "  filtered run count:",
+                {r: int((metadata['run'].to_numpy() == r).sum()) for r in sorted(metadata['run'].unique())}
+            )
 
-        save_subject_mat(out_file, X, y, metadata)
+            save_subject_mat(out_file, X, y, metadata)
 
-        # 保存后再校验一次
-        ok, reason = validate_saved_mat(
-            out_file,
-            expected_trials=45,
-            expected_channels=64,
-            expected_samples=expected_samples,
-            expected_runs=[0, 1, 2],
-            expected_run_count={0: 15, 1: 15, 2: 15},
-            expected_labels=[0, 1],
-        )
-        if not ok:
-            raise RuntimeError(f"[MI1] saved file validation failed for {out_file}: {reason}")
+            ok, reason = validate_saved_mat(
+                out_file,
+                expected_trials=45,
+                expected_channels=64,
+                expected_samples=expected_samples,
+                expected_runs=[0, 1, 2],
+                expected_run_count={0: 15, 1: 15, 2: 15},
+                expected_labels=[0, 1],
+            )
 
-        print(f"  Saved: {out_file}")
+            if not ok:
+                print(f"[bad] MI1 subject {subj}: {reason}")
+                bad_subjects.append((subj, reason))
+                try:
+                    os.remove(out_file)
+                except OSError:
+                    pass
+                continue
 
+            print(f"  Saved: {out_file}")
+            saved_ok.append(subj)
+
+        except Exception as e:
+            print(f"[error] MI1 subject {subj}: {e}")
+            bad_subjects.append((subj, str(e)))
+            try:
+                if os.path.exists(out_file):
+                    os.remove(out_file)
+            except OSError:
+                pass
+            continue
+
+    print("\n[MI1] Summary")
+    print("  skipped_ok   :", len(skipped_ok), skipped_ok[:20], "..." if len(skipped_ok) > 20 else "")
+    print("  redownloaded :", len(redownloaded), redownloaded[:20], "..." if len(redownloaded) > 20 else "")
+    print("  saved_ok     :", len(saved_ok), saved_ok[:20], "..." if len(saved_ok) > 20 else "")
+    print("  bad_subjects :", len(bad_subjects))
+    for subj, reason in bad_subjects:
+        print(f"    subject {subj}: {reason}")
 
 def download_mi2_bci2a(
     out_root: str,

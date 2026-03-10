@@ -2,3 +2,5 @@
 data/MI1/*
 data/MI1_partial/*
 models/checkpoints_MI1/*
+data/download.log
+data/MI1_obsolete/*
