@@ -58,6 +58,7 @@ class EvalResult:
     mi_acc: float
     user_acc: float
     bca: float
+    uia: float
 
 
 @torch.no_grad()
@@ -82,10 +83,19 @@ def evaluate_metrics(
         autocast_ctx = nullcontext()
 
     for batch in dataloader:
-        if len(batch) != 3:
-            raise ValueError("Each batch must be (x, y_task, y_user)")
+        # 兼容两种格式：
+        # 1) (x, y_task, y_user)
+        # 2) (x, y_task, y_user, y_session)
+        if len(batch) == 3:
+            x, y_task, y_user = batch
+        elif len(batch) == 4:
+            x, y_task, y_user, _ = batch
+        else:
+            raise ValueError(
+                "Each batch must be (x, y_task, y_user) "
+                "or (x, y_task, y_user, y_session)"
+            )
 
-        x, y_task, y_user = batch
         x = x.to(device)
         y_task = y_task.to(device)
         y_user = y_user.to(device)
@@ -104,6 +114,14 @@ def evaluate_metrics(
         all_user_true.append(y_user.detach().cpu())
         all_user_pred.append(user_pred.detach().cpu())
 
+    if len(all_task_true) == 0:
+        return EvalResult(
+            mi_acc=0.0,
+            user_acc=0.0,
+            bca=0.0,
+            uia=0.0,
+        )
+
     y_task_true = torch.cat(all_task_true, dim=0)
     y_task_pred = torch.cat(all_task_pred, dim=0)
     y_user_true = torch.cat(all_user_true, dim=0)
@@ -113,8 +131,12 @@ def evaluate_metrics(
     user_acc = compute_accuracy(y_user_true, y_user_pred)
     bca = compute_bca(y_task_true, y_task_pred, n_classes=n_task_classes)
 
+    # 当前先把 UIA 视为 user_acc
+    uia = user_acc
+
     return EvalResult(
         mi_acc=mi_acc,
         user_acc=user_acc,
         bca=bca,
+        uia=uia,
     )

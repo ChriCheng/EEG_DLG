@@ -1,6 +1,7 @@
 # Large datasets (excluded from version control)
 data/MI1/*
 data/MI1_partial/*
-models/checkpoints_MI1/*
+models/checkpoints_MI1_LOSO/*
 data/download.log
 data/MI1_obsolete/*
+models/checkpoints_MI1_LOSO_2stage/*
