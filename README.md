@@ -35,3 +35,13 @@ For rigorous reproducibility consistent with academic practice:
 If you use this repository in a scientific context, please cite the UIP-EEG paper:
 
 > “User Identity Protection in EEG-Based Brain–Computer Interfaces.”
+
+eg for train_user_only.py\
+`
+python train_user_only.py   --mi1_dir ../data/MI1   --epochs 600   --batch_size 8   --lr 2e-3   --user_hidden_dim 128   --user_dropout 0.5   --normalize channel --weight_decay 1e-4
+`
+
+eg for train_eegnet_MI1.py\
+`
+python train_eegnet_MI1.py   --mi1_dir ../data/MI1   --save_root ./checkpoints_MI1_LOSO_2stage   --task_epochs 100   --user_epochs 100   --batch_size 8   --task_lr 2e-3   --user_lr 1e-3  --weight_decay 1e-4 --seeds 0
+`

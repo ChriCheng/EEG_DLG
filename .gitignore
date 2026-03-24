@@ -5,3 +5,5 @@ models/checkpoints_MI1_LOSO/*
 data/download.log
 data/MI1_obsolete/*
 models/checkpoints_MI1_LOSO_2stage/*
+TODO
+models/checkpoints_MI1_user_only/*

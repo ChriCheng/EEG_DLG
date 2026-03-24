@@ -27,7 +27,7 @@ class MI1Dataset(Dataset):
     Session is read from each mat file and used for LOSO splitting.
     """
 
-    def __init__(self, mi1_dir: str):
+    def __init__(self, mi1_dir: str, normalize: str = "channel"):
         mi1_dir = Path(mi1_dir)
         mat_files = sorted(mi1_dir.glob("*.mat"))
 
@@ -49,7 +49,7 @@ class MI1Dataset(Dataset):
             if "X" not in data or "y" not in data or "session" not in data:
                 raise ValueError(f"Missing X/y/session in {mat_path}")
 
-            X = data["X"]
+            X = np.asarray(data["X"], dtype=np.float32)   # (N, C, T)
             y_task = np.asarray(data["y"]).reshape(-1)
             y_session = np.asarray(data["session"]).reshape(-1)
 
@@ -61,6 +61,22 @@ class MI1Dataset(Dataset):
                     f"Mismatch in {mat_path}: "
                     f"X.shape[0]={X.shape[0]}, len(y_task)={len(y_task)}, len(y_session)={len(y_session)}"
                 )
+
+            # ---------- optional normalization ----------
+            if normalize == "trial":
+                # each trial over all channels + times
+                mean = X.mean(axis=(1, 2), keepdims=True)
+                std = X.std(axis=(1, 2), keepdims=True) + 1e-6
+                X = (X - mean) / std
+            elif normalize == "channel":
+                # each trial, each channel over time
+                mean = X.mean(axis=2, keepdims=True)
+                std = X.std(axis=2, keepdims=True) + 1e-6
+                X = (X - mean) / std
+            elif normalize == "none":
+                pass
+            else:
+                raise ValueError(f"Unknown normalize={normalize}")
 
             X_all.append(X)
             y_task_all.append(y_task)
@@ -107,6 +123,7 @@ class MI1Dataset(Dataset):
         print("users:", self.n_users)
         print("sessions:", self.n_sessions)
         print("original session values:", self.session_original_values)
+        print("normalize:", normalize)
 
     def __len__(self):
         return self.n_samples
@@ -472,7 +489,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--task_lr", type=float, default=1e-3)
     parser.add_argument("--user_lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--user_hidden_dim", type=int, default=128)
     parser.add_argument("--save_every", type=int, default=10)
@@ -482,6 +499,12 @@ def main():
         default="0,1,2,3,4",
         help="Five random seeds, e.g. 0,1,2,3,4",
     )
+    parser.add_argument(
+    "--normalize",
+    type=str,
+    default="channel",
+    choices=["none", "trial", "channel"],
+)
     args = parser.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
@@ -491,7 +514,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- dataset ----
-    ds = MI1Dataset(args.mi1_dir)
+    ds = MI1Dataset(args.mi1_dir, normalize=args.normalize)
 
     print("\n=== Dataset Summary ===")
     print(f"mi1_dir          : {args.mi1_dir}")
@@ -527,6 +550,7 @@ def main():
         "user_hidden_dim": args.user_hidden_dim,
         "save_every": args.save_every,
         "seeds": seeds,
+        "normalize": args.normalize,
         "dataset_summary": {
             "n_samples": ds.n_samples,
             "n_channels": ds.n_channels,
