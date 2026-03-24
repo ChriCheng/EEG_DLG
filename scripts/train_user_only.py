@@ -14,7 +14,8 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
 
-from eegnet import EEGNetConfig, EEGNetFeatureExtractor, UserClassifier
+from models.EEGNet import EEGNetConfig, EEGNetFeatureExtractor, UserClassifier
+
 
 
 # =========================

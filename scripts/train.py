@@ -6,7 +6,7 @@ import json
 import random
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Any
 
 import numpy as np
 import scipy.io as scio
@@ -14,7 +14,8 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
 
-from models.eegnet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
+from models.EEGNet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
+from models.ShallowCNN import ShallowCNNConfig, ShallowCNNMI1MI2
 
 
 # =========================
@@ -168,18 +169,51 @@ def save_json(obj: Dict, path: Path) -> None:
         json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
-def build_model(ds: MI1Dataset, user_hidden_dim: int) -> Tuple[EEGNetMI1MI2, EEGNetConfig]:
-    cfg = EEGNetConfig(
-        n_channels=ds.n_channels,
-        n_times=ds.n_times,
+def build_dataset(dataset_name: str, data_dir: str, normalize: str) -> Dataset:
+    dataset_name = dataset_name.strip()
+
+    if dataset_name == "MI1":
+        return MI1Dataset(data_dir, normalize=normalize)
+
+    raise NotImplementedError(
+        f"Dataset {dataset_name!r} is not implemented yet. "
+        f"Currently supported: ['MI1']"
     )
-    model = EEGNetMI1MI2(
-        cfg,
-        n_task_classes=ds.n_task_classes,
-        n_users=ds.n_users,
-        user_hidden_dim=user_hidden_dim,
+
+
+def build_model(ds: Dataset, user_hidden_dim: int, model_name: str) -> Tuple[nn.Module, Any]:
+    model_name = model_name.strip()
+
+    if model_name == "EEGNet":
+        cfg = EEGNetConfig(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+        )
+        model = EEGNetMI1MI2(
+            cfg,
+            n_task_classes=ds.n_task_classes,
+            n_users=ds.n_users,
+            user_hidden_dim=user_hidden_dim,
+        )
+        return model, cfg
+
+    if model_name == "ShallowCNN":
+        cfg = ShallowCNNConfig(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+        )
+        model = ShallowCNNMI1MI2(
+            cfg,
+            n_task_classes=ds.n_task_classes,
+            n_users=ds.n_users,
+            user_hidden_dim=user_hidden_dim,
+        )
+        return model, cfg
+
+    raise ValueError(
+        f"Unknown model={model_name!r}. "
+        f"Currently supported: ['EEGNet', 'ShallowCNN']"
     )
-    return model, cfg
 
 
 def save_checkpoint(
@@ -188,7 +222,7 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer | None,
     epoch: int,
     metrics: Dict,
-    cfg: EEGNetConfig,
+    cfg: Any,
     extra: Dict,
 ) -> None:
     ckpt = {
@@ -196,13 +230,13 @@ def save_checkpoint(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
         "metrics": metrics,
-        "eegnet_config": asdict(cfg),
+        "model_config": asdict(cfg),
         "extra": extra,
     }
     torch.save(ckpt, path)
 
 
-def build_loso_split(ds: MI1Dataset, train_session_internal: int) -> Tuple[List[int], List[int]]:
+def build_loso_split(ds: Dataset, train_session_internal: int) -> Tuple[List[int], List[int]]:
     all_sessions = ds.y_session.numpy()
     train_idx = np.where(all_sessions == train_session_internal)[0].tolist()
     test_idx = np.where(all_sessions != train_session_internal)[0].tolist()
@@ -275,7 +309,7 @@ def unfreeze_module(module: nn.Module) -> None:
 # 3) Stage 1: train task model
 # =========================
 def train_task_one_epoch(
-    model: EEGNetMI1MI2,
+    model: nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -319,7 +353,7 @@ def train_task_one_epoch(
 
 @torch.no_grad()
 def evaluate_task(
-    model: EEGNetMI1MI2,
+    model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
     n_task_classes: int,
@@ -364,7 +398,7 @@ def evaluate_task(
 # 4) Stage 2: train user classifier on fixed backbone
 # =========================
 def reset_user_head(
-    model: EEGNetMI1MI2,
+    model: nn.Module,
     n_users: int,
     hidden_dim: int,
     device: torch.device,
@@ -378,7 +412,7 @@ def reset_user_head(
 
 
 def train_user_one_epoch(
-    model: EEGNetMI1MI2,
+    model: nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -429,7 +463,7 @@ def train_user_one_epoch(
 
 @torch.no_grad()
 def evaluate_user(
-    model: EEGNetMI1MI2,
+    model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
@@ -476,13 +510,31 @@ def evaluate_user(
 # =========================
 def main():
     parser = argparse.ArgumentParser(
-        description="Two-stage EEGNet baseline on MI1 with LOSO: "
+        description="Two-stage baseline with LOSO: "
                     "(1) train task model, (2) train user classifier on fixed backbone"
     )
-    parser.add_argument("--mi1_dir", type=str, default="data/MI1")
-    parser.add_argument("--save_root", type=str, default="checkpoint/checkpoints_MI1_LOSO_2stage")
+
+    # ---- dataset / model selection ----
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="MI1",
+        help="Dataset name, e.g. MI1",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="EEGNet",
+        choices=["EEGNet", "ShallowCNN"],
+        help="Model backbone to use",
+    )
+
+
+    # ---- save path ----
+    parser.add_argument("--save_root", type=str, default="checkpoint/checkpoints_2stage")
     parser.add_argument("--run_name", type=str, default=None)
 
+    # ---- training ----
     parser.add_argument("--task_epochs", type=int, default=100)
     parser.add_argument("--user_epochs", type=int, default=100)
 
@@ -493,6 +545,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--user_hidden_dim", type=int, default=128)
     parser.add_argument("--save_every", type=int, default=10)
+
     parser.add_argument(
         "--seeds",
         type=str,
@@ -500,11 +553,12 @@ def main():
         help="Five random seeds, e.g. 0,1,2,3,4",
     )
     parser.add_argument(
-    "--normalize",
-    type=str,
-    default="channel",
-    choices=["none", "trial", "channel"],
-)
+        "--normalize",
+        type=str,
+        default="channel",
+        choices=["none", "trial", "channel"],
+    )
+
     args = parser.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
@@ -514,10 +568,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---- dataset ----
-    ds = MI1Dataset(args.mi1_dir, normalize=args.normalize)
+    args.data_dir = "data/" + args.dataset
+    ds = build_dataset(
+        dataset_name=args.dataset,
+        data_dir=args.data_dir,
+        normalize=args.normalize,
+    )
 
     print("\n=== Dataset Summary ===")
-    print(f"mi1_dir          : {args.mi1_dir}")
+    print(f"dataset          : {args.dataset}")
+    print(f"model            : {args.model}")
+    print(f"data_dir         : {args.data_dir}")
     print(f"n_samples        : {ds.n_samples}")
     print(f"n_channels       : {ds.n_channels}")
     print(f"n_times          : {ds.n_times}")
@@ -531,13 +592,15 @@ def main():
     print()
 
     # ---- save dir ----
-    run_dir = make_run_dir(args.save_root, args.run_name)
+    run_dir = make_run_dir(args.save_root + "_"+args.model, args.run_name) 
     print(f"Run directory     : {run_dir}")
     print(f"Device            : {device}")
     print()
 
     config_to_save = {
-        "mi1_dir": args.mi1_dir,
+        "dataset": args.dataset,
+        "model": args.model,
+        "data_dir": args.data_dir,
         "save_root": args.save_root,
         "run_name": run_dir.name,
         "task_epochs": args.task_epochs,
@@ -616,7 +679,11 @@ def main():
             # =====================================================
             # Stage 1: train task model
             # =====================================================
-            model, cfg = build_model(ds, user_hidden_dim=args.user_hidden_dim)
+            model, cfg = build_model(
+                ds,
+                user_hidden_dim=args.user_hidden_dim,
+                model_name=args.model,
+            )
             model = model.to(device)
 
             # stage1: only backbone + task_head
@@ -653,6 +720,8 @@ def main():
                 )
 
                 row = {
+                    "dataset": args.dataset,
+                    "model": args.model,
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
@@ -677,7 +746,8 @@ def main():
 
                 extra = {
                     "stage": "task",
-                    "dataset_type": "MI1",
+                    "dataset_type": args.dataset,
+                    "model_name": args.model,
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
@@ -772,6 +842,8 @@ def main():
                 )
 
                 row = {
+                    "dataset": args.dataset,
+                    "model": args.model,
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
@@ -797,7 +869,8 @@ def main():
 
                 extra = {
                     "stage": "user",
-                    "dataset_type": "MI1",
+                    "dataset_type": args.dataset,
+                    "model_name": args.model,
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
@@ -851,6 +924,8 @@ def main():
             # Fold summary
             # =====================================================
             fold_result = {
+                "dataset": args.dataset,
+                "model": args.model,
                 "seed": seed,
                 "train_session_internal": train_session_internal,
                 "train_session_original": train_session_original,
@@ -881,6 +956,8 @@ def main():
         return float(np.mean([r[key] for r in rows]))
 
     final_summary = {
+        "dataset": args.dataset,
+        "model": args.model,
         "num_total_runs": len(all_fold_results),
         "mean_test_mi_acc": mean_metric(all_fold_results, "test_mi_acc"),
         "mean_test_bca": mean_metric(all_fold_results, "test_bca"),
@@ -893,6 +970,8 @@ def main():
 
     print("\n" + "=" * 80)
     print("Training finished.")
+    print(f"Dataset: {args.dataset}")
+    print(f"Model  : {args.model}")
     print(f"Run dir: {run_dir}")
     print(f"Total runs: {len(all_fold_results)}")
     print()
