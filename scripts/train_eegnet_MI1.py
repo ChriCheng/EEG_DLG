@@ -14,7 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
 
-from eegnet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
+from models.eegnet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
 
 
 # =========================
@@ -479,8 +479,8 @@ def main():
         description="Two-stage EEGNet baseline on MI1 with LOSO: "
                     "(1) train task model, (2) train user classifier on fixed backbone"
     )
-    parser.add_argument("--mi1_dir", type=str, default="../data/MI1")
-    parser.add_argument("--save_root", type=str, default="./checkpoints_MI1_LOSO_2stage")
+    parser.add_argument("--mi1_dir", type=str, default="data/MI1")
+    parser.add_argument("--save_root", type=str, default="checkpoint/checkpoints_MI1_LOSO_2stage")
     parser.add_argument("--run_name", type=str, default=None)
 
     parser.add_argument("--task_epochs", type=int, default=100)

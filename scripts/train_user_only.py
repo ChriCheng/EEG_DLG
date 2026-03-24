@@ -356,8 +356,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="User-only EEGNet baseline on MI1 with LOSO session split"
     )
-    parser.add_argument("--mi1_dir", type=str, default="../data/MI1")
-    parser.add_argument("--save_root", type=str, default="./checkpoints_MI1_user_only")
+    parser.add_argument("--mi1_dir", type=str, default="data/MI1")
+    parser.add_argument("--save_root", type=str, default="checkpoint/checkpoints_MI1_user_only")
     parser.add_argument("--run_name", type=str, default=None)
 
     parser.add_argument("--epochs", type=int, default=100)
