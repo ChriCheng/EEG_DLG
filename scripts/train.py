@@ -13,6 +13,7 @@ import scipy.io as scio
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
+from dataclasses import asdict
 
 from models.EEGNet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
 from models.ShallowCNN import ShallowCNNConfig, ShallowCNNMI1MI2
@@ -402,12 +403,13 @@ def reset_user_head(
     n_users: int,
     hidden_dim: int,
     device: torch.device,
+    dropout: float 
 ) -> None:
     model.user_head = UserClassifier(
         feature_dim=model.backbone.feature_dim,
         n_users=n_users,
         hidden_dim=hidden_dim,
-        dropout=0.5,
+        dropout=dropout,
     ).to(device)
 
 
@@ -503,12 +505,28 @@ def evaluate_user(
         "user_acc": user_acc,
         "uia": user_acc,
     }
+def build_model_config(ds: Dataset, model_name: str):
+    model_name = model_name.strip()
 
+    if model_name == "EEGNet":
+        return EEGNetConfig(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+        )
+
+    if model_name == "ShallowCNN":
+        return ShallowCNNConfig(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+        )
+
+    raise ValueError(f"Unknown model={model_name!r}")
 
 # =========================
 # 5) Main
 # =========================
 def main():
+    
     parser = argparse.ArgumentParser(
         description="Two-stage baseline with LOSO: "
                     "(1) train task model, (2) train user classifier on fixed backbone"
@@ -543,8 +561,9 @@ def main():
     parser.add_argument("--user_lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--user_hidden_dim", type=int, default=128)
+    parser.add_argument("--user_hidden_dim", type=int, default=256)
     parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--user_dropout", type=float, default=0.5)
 
     parser.add_argument(
         "--seeds",
@@ -555,7 +574,7 @@ def main():
     parser.add_argument(
         "--normalize",
         type=str,
-        default="channel",
+        default="none",
         choices=["none", "trial", "channel"],
     )
 
@@ -574,7 +593,12 @@ def main():
         data_dir=args.data_dir,
         normalize=args.normalize,
     )
-
+    model_cfg_for_run = build_model_config(ds, args.model)
+    model_cfg_dict = asdict(model_cfg_for_run)
+    user_head_cfg = {
+    "hidden_dim": args.user_hidden_dim,
+    "dropout": args.user_dropout,
+}
     print("\n=== Dataset Summary ===")
     print(f"dataset          : {args.dataset}")
     print(f"model            : {args.model}")
@@ -614,6 +638,9 @@ def main():
         "save_every": args.save_every,
         "seeds": seeds,
         "normalize": args.normalize,
+        "model_config": model_cfg_dict,
+        "user_head_config": user_head_cfg,
+
         "dataset_summary": {
             "n_samples": ds.n_samples,
             "n_channels": ds.n_channels,
@@ -810,6 +837,7 @@ def main():
                 n_users=ds.n_users,
                 hidden_dim=args.user_hidden_dim,
                 device=device,
+                dropout=args.user_dropout,
             )
 
             freeze_module(model.backbone)
