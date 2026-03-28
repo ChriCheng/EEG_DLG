@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 from dataclasses import asdict
@@ -12,8 +13,9 @@ import scipy.io as scio
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
+from dataclasses import asdict
 
-from models.EEGNet import EEGNetConfig, EEGNetMI1MI2
+from models.EEGNet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
 from models.ShallowCNN import ShallowCNNConfig, ShallowCNNMI1MI2
 
 
@@ -394,15 +396,31 @@ def evaluate_task(
 
 
 # =========================
-# 4) Stage 2: train user model from scratch
+# 4) Stage 2: train user classifier on fixed backbone
 # =========================
+def reset_user_head(
+    model: nn.Module,
+    n_users: int,
+    hidden_dim: int,
+    device: torch.device,
+    dropout: float 
+) -> None:
+    model.user_head = UserClassifier(
+        feature_dim=model.backbone.feature_dim,
+        n_users=n_users,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+    ).to(device)
+
+
 def train_user_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> Dict[str, float]:
-    model.backbone.train()
+    # backbone fixed, user_head train
+    model.backbone.eval()
     model.task_head.eval()
     model.user_head.train()
 
@@ -511,7 +529,7 @@ def main():
     
     parser = argparse.ArgumentParser(
         description="Two-stage baseline with LOSO: "
-                    "(1) train task model, (2) train user model from scratch"
+                    "(1) train task model, (2) train user classifier on fixed backbone"
     )
 
     # ---- dataset / model selection ----
@@ -709,6 +727,7 @@ def main():
             best_task_bca = -1.0
             best_task_epoch = -1
             best_task_row = None
+            best_task_state = None
             task_history = []
 
             print("\n[Stage 1] Train task model")
@@ -786,6 +805,7 @@ def main():
                     best_task_bca = row["test_bca"]
                     best_task_epoch = epoch
                     best_task_row = dict(row)
+                    best_task_state = copy.deepcopy(model.state_dict())
 
                     save_checkpoint(
                         path=fold_dir / "best_task_by_bca.pth",
@@ -800,24 +820,32 @@ def main():
 
                 save_json({"task_history": task_history}, fold_dir / "task_history.json")
 
-            # =====================================================
-            # Stage 2: train user model from scratch
-            # =====================================================
-            print("\n[Stage 2] Train user model from scratch")
+            if best_task_state is None:
+                raise RuntimeError("best_task_state is None after Stage 1")
 
-            model, cfg = build_model(
-                ds,
-                user_hidden_dim=args.user_hidden_dim,
-                model_name=args.model,
+            # load best task model before stage 2
+            model.load_state_dict(best_task_state)
+
+            # =====================================================
+            # Stage 2: train user classifier on fixed backbone
+            # =====================================================
+            print("\n[Stage 2] Train user classifier on fixed backbone")
+
+            # reset user head to avoid contamination from stage 1
+            reset_user_head(
+                model=model,
+                n_users=ds.n_users,
+                hidden_dim=args.user_hidden_dim,
+                device=device,
+                dropout=args.user_dropout,
             )
-            model = model.to(device)
 
             unfreeze_module(model.backbone)
             freeze_module(model.task_head)
             unfreeze_module(model.user_head)
 
             user_optimizer = torch.optim.Adam(
-                list(model.backbone.parameters()) + list(model.user_head.parameters()),
+                model.user_head.parameters(),
                 lr=args.user_lr,
                 weight_decay=args.weight_decay,
             )
@@ -874,7 +902,8 @@ def main():
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
-                    "stage2_init": "scratch",
+                    "best_task_epoch": best_task_epoch,
+                    "best_task_bca": best_task_bca,
                 }
 
                 save_checkpoint(

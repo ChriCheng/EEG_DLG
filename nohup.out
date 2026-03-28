@@ -1,0 +1,127 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/miniconda3/envs/FedBS/lib/python3.9/runpy.py", line 197, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/home/ubuntu/miniconda3/envs/FedBS/lib/python3.9/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/home/ubuntu/code/EEG_DLG/scripts/train.py", line 1016, in <module>
+    main()
+  File "/home/ubuntu/code/EEG_DLG/scripts/train.py", line 591, in main
+    ds = build_dataset(
+  File "/home/ubuntu/code/EEG_DLG/scripts/train.py", line 177, in build_dataset
+    return MI1Dataset(data_dir, normalize=normalize)
+  File "/home/ubuntu/code/EEG_DLG/scripts/train.py", line 49, in __init__
+    data = scio.loadmat(mat_path)
+  File "/home/ubuntu/miniconda3/envs/FedBS/lib/python3.9/site-packages/scipy/io/matlab/_mio.py", line 226, in loadmat
+    MR, _ = mat_reader_factory(f, **kwargs)
+  File "/home/ubuntu/miniconda3/envs/FedBS/lib/python3.9/site-packages/scipy/io/matlab/_mio.py", line 74, in mat_reader_factory
+    mjv, mnv = _get_matfile_version(byte_stream)
+  File "/home/ubuntu/miniconda3/envs/FedBS/lib/python3.9/site-packages/scipy/io/matlab/_miobase.py", line 230, in _get_matfile_version
+    mopt_bytes = fileobj.read(4)
+KeyboardInterrupt
+[Warn] Paper says repeat 5 times, current seeds=[0]
+Loaded mat files:
+  1.mat
+  10.mat
+  101.mat
+  102.mat
+  103.mat
+  105.mat
+  106.mat
+  107.mat
+  108.mat
+  109.mat
+  11.mat
+  12.mat
+  13.mat
+  14.mat
+  15.mat
+  16.mat
+  17.mat
+  18.mat
+  19.mat
+  2.mat
+  20.mat
+  21.mat
+  22.mat
+  23.mat
+  24.mat
+  25.mat
+  26.mat
+  27.mat
+  28.mat
+  29.mat
+  3.mat
+  30.mat
+  31.mat
+  32.mat
+  33.mat
+  34.mat
+  35.mat
+  36.mat
+  37.mat
+  38.mat
+  39.mat
+  4.mat
+  40.mat
+  41.mat
+  42.mat
+  43.mat
+  44.mat
+  45.mat
+  46.mat
+  47.mat
+  48.mat
+  49.mat
+  5.mat
+  50.mat
+  51.mat
+  52.mat
+  53.mat
+  54.mat
+  55.mat
+  56.mat
+  57.mat
+  58.mat
+  59.mat
+  6.mat
+  60.mat
+  61.mat
+  62.mat
+  63.mat
+  64.mat
+  65.mat
+  66.mat
+  67.mat
+  68.mat
+  69.mat
+  7.mat
+  70.mat
+  71.mat
+  72.mat
+  73.mat
+  74.mat
+  75.mat
+  76.mat
+  77.mat
+  78.mat
+  79.mat
+  8.mat
+  80.mat
+  81.mat
+  82.mat
+  83.mat
+  84.mat
+  85.mat
+  86.mat
+  87.mat
+  89.mat
+  9.mat
+  90.mat
+  91.mat
+  93.mat
+  94.mat
+  95.mat
+  96.mat
+  97.mat
+  98.mat
+  99.mat

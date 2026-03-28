@@ -43,5 +43,5 @@ python -m scripts.train_user_only --epochs 600 --batch_size 8 --lr 2e-3 --user_h
 
 eg for train_eegnet_MI1.py\
 `
-python -m scripts.train --task_epochs 100   --user_epochs 100   --batch_size 8   --task_lr 2e-3   --user_lr 1e-3  --weight_decay 1e-4 --seeds 0 --dataset MI1 --model ShallowCNN
+python -m scripts.train --task_epochs 100   --user_epochs 100   --batch_size 8   --task_lr 2e-3   --user_lr 1e-3  --weight_decay 1e-4 --seeds 0 --dataset MI1 --model EEGNet
 `

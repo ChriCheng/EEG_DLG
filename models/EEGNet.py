@@ -8,14 +8,14 @@ from torch import nn
 class EEGNetConfig:
     n_channels: int
     n_times: int
-    F1: int = 12
-    D: int = 2
-    F2: int = 24
+    F1: int = 16
+    D: int = 4
+    F2: int = 64
     kernel_length: int = 64
     pool1: int = 2
     pool2: int = 4
     dropout: float = 0.25
-    temporal_kernels: tuple[int, ...] =(7,15,31)
+    temporal_kernels: tuple[int, ...] =(15,31,63)
 
 class MultiScaleTemporalConv(nn.Module):
     """
