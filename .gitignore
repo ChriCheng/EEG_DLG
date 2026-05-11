@@ -5,4 +5,7 @@ models/checkpoints_MI1_LOSO/*
 data/download.log
 data/MI1_obsolete/*
 checkpoint/*
+data/p300/*
+data/P300/*
 TODO
+logs/*

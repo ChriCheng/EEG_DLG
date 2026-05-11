@@ -15,6 +15,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
 
 from models.EEGNet import EEGNetConfig, EEGNetFeatureExtractor, UserClassifier
+from scripts.euclidean_alignment import euclidean_align_trials
 
 
 
@@ -28,7 +29,12 @@ class MI1Dataset(Dataset):
     Session is read from each mat file and used for LOSO splitting.
     """
 
-    def __init__(self, mi1_dir: str, normalize: str = "channel"):
+    def __init__(
+        self,
+        mi1_dir: str,
+        normalize: str = "channel",
+        euclidean_align: bool = False,
+    ):
         mi1_dir = Path(mi1_dir)
         mat_files = sorted(mi1_dir.glob("*.mat"))
 
@@ -59,6 +65,9 @@ class MI1Dataset(Dataset):
                 raise ValueError(
                     f"Mismatch in {mat_path}: X.shape[0]={X.shape[0]}, len(session)={len(y_session)}"
                 )
+
+            if euclidean_align:
+                X = euclidean_align_trials(X)
 
             # ---------- optional normalization ----------
             if normalize == "trial":
@@ -108,6 +117,8 @@ class MI1Dataset(Dataset):
         print("users:", self.n_users)
         print("sessions:", self.n_sessions)
         print("original session values:", self.session_original_values)
+        print("normalize:", normalize)
+        print("euclidean_align:", euclidean_align)
 
     def __len__(self):
         return self.n_samples
@@ -370,6 +381,11 @@ def main():
     parser.add_argument("--user_hidden_dim", type=int, default=128)
     parser.add_argument("--user_dropout", type=float, default=0.5)
     parser.add_argument("--normalize", type=str, default="channel", choices=["none", "trial", "channel"])
+    parser.add_argument(
+        "--euclidean_align",
+        action="store_true",
+        help="Apply subject-wise Euclidean Alignment before optional z-score normalization.",
+    )
     parser.add_argument("--save_every", type=int, default=10)
 
     parser.add_argument(
@@ -386,7 +402,11 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ds = MI1Dataset(args.mi1_dir, normalize=args.normalize)
+    ds = MI1Dataset(
+        args.mi1_dir,
+        normalize=args.normalize,
+        euclidean_align=args.euclidean_align,
+    )
 
     print("\n=== Dataset Summary ===")
     print(f"mi1_dir          : {args.mi1_dir}")
@@ -417,6 +437,7 @@ def main():
         "user_hidden_dim": args.user_hidden_dim,
         "user_dropout": args.user_dropout,
         "normalize": args.normalize,
+        "euclidean_align": args.euclidean_align,
         "save_every": args.save_every,
         "seeds": seeds,
         "dataset_summary": {

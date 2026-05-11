@@ -17,6 +17,7 @@ from dataclasses import asdict
 
 from models.EEGNet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
 from models.ShallowCNN import ShallowCNNConfig, ShallowCNNMI1MI2
+from scripts.euclidean_alignment import euclidean_align_trials
 
 
 # =========================
@@ -29,7 +30,12 @@ class MI1Dataset(Dataset):
     Session is read from each mat file and used for LOSO splitting.
     """
 
-    def __init__(self, mi1_dir: str, normalize: str = "channel"):
+    def __init__(
+        self,
+        mi1_dir: str,
+        normalize: str = "channel",
+        euclidean_align: bool = False,
+    ):
         mi1_dir = Path(mi1_dir)
         mat_files = sorted(mi1_dir.glob("*.mat"))
 
@@ -63,6 +69,9 @@ class MI1Dataset(Dataset):
                     f"Mismatch in {mat_path}: "
                     f"X.shape[0]={X.shape[0]}, len(y_task)={len(y_task)}, len(y_session)={len(y_session)}"
                 )
+
+            if euclidean_align:
+                X = euclidean_align_trials(X)
 
             # ---------- optional normalization ----------
             if normalize == "trial":
@@ -126,6 +135,7 @@ class MI1Dataset(Dataset):
         print("sessions:", self.n_sessions)
         print("original session values:", self.session_original_values)
         print("normalize:", normalize)
+        print("euclidean_align:", euclidean_align)
 
     def __len__(self):
         return self.n_samples
@@ -170,15 +180,24 @@ def save_json(obj: Dict, path: Path) -> None:
         json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
-def build_dataset(dataset_name: str, data_dir: str, normalize: str) -> Dataset:
+def build_dataset(
+    dataset_name: str,
+    data_dir: str,
+    normalize: str,
+    euclidean_align: bool,
+) -> Dataset:
     dataset_name = dataset_name.strip()
 
-    if dataset_name == "MI1":
-        return MI1Dataset(data_dir, normalize=normalize)
+    if dataset_name in {"MI1", "P300"}:
+        return MI1Dataset(
+            data_dir,
+            normalize=normalize,
+            euclidean_align=euclidean_align,
+        )
 
     raise NotImplementedError(
         f"Dataset {dataset_name!r} is not implemented yet. "
-        f"Currently supported: ['MI1']"
+        f"Currently supported: ['MI1', 'P300']"
     )
 
 
@@ -577,6 +596,11 @@ def main():
         default="none",
         choices=["none", "trial", "channel"],
     )
+    parser.add_argument(
+        "--euclidean_align",
+        action="store_true",
+        help="Apply subject-wise Euclidean Alignment before optional z-score normalization.",
+    )
 
     args = parser.parse_args()
 
@@ -592,6 +616,7 @@ def main():
         dataset_name=args.dataset,
         data_dir=args.data_dir,
         normalize=args.normalize,
+        euclidean_align=args.euclidean_align,
     )
     model_cfg_for_run = build_model_config(ds, args.model)
     model_cfg_dict = asdict(model_cfg_for_run)
@@ -638,6 +663,7 @@ def main():
         "save_every": args.save_every,
         "seeds": seeds,
         "normalize": args.normalize,
+        "euclidean_align": args.euclidean_align,
         "model_config": model_cfg_dict,
         "user_head_config": user_head_cfg,
 
