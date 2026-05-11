@@ -17,6 +17,18 @@ class EEGNetConfig:
     dropout: float = 0.25
     temporal_kernels: tuple[int, ...] =(15,31,63)
 
+
+@dataclass
+class LMEEGNetConfig:
+    n_channels: int
+    n_times: int
+    F1: int = 4
+    D: int = 2
+    F2: int = 8
+    kernel_length: int = 64
+    dropout: float = 0.25
+
+
 class MultiScaleTemporalConv(nn.Module):
     """
     Input:  (B, 1, C, T)
@@ -267,6 +279,96 @@ class UserClassifier(nn.Module):
         return self.fc2(x)
 
 
+class LMEEGNetFeatureExtractor(nn.Module):
+    """
+    EEGNet backbone matching lbinmeng/EEG_Privacy_Protection:
+    temporal conv -> depthwise spatial conv -> separable temporal conv -> flatten.
+    """
+    def __init__(self, cfg: LMEEGNetConfig):
+        super().__init__()
+        self.cfg = cfg
+
+        self.block1 = nn.Sequential(
+            nn.ZeroPad2d(
+                (
+                    cfg.kernel_length // 2 - 1,
+                    cfg.kernel_length - cfg.kernel_length // 2,
+                    0,
+                    0,
+                )
+            ),
+            nn.Conv2d(
+                in_channels=1,
+                out_channels=cfg.F1,
+                kernel_size=(1, cfg.kernel_length),
+                stride=1,
+                bias=False,
+            ),
+            nn.BatchNorm2d(cfg.F1),
+            nn.Conv2d(
+                in_channels=cfg.F1,
+                out_channels=cfg.F1 * cfg.D,
+                kernel_size=(cfg.n_channels, 1),
+                groups=cfg.F1,
+                bias=False,
+            ),
+            nn.BatchNorm2d(cfg.F1 * cfg.D),
+            nn.ELU(),
+            nn.AvgPool2d((1, 4)),
+            nn.Dropout(cfg.dropout),
+        )
+
+        self.block2 = nn.Sequential(
+            nn.ZeroPad2d((7, 8, 0, 0)),
+            nn.Conv2d(
+                in_channels=cfg.F1 * cfg.D,
+                out_channels=cfg.F1 * cfg.D,
+                kernel_size=(1, 16),
+                stride=1,
+                groups=cfg.F1 * cfg.D,
+                bias=False,
+            ),
+            nn.BatchNorm2d(cfg.F1 * cfg.D),
+            nn.Conv2d(
+                in_channels=cfg.F1 * cfg.D,
+                out_channels=cfg.F2,
+                kernel_size=(1, 1),
+                stride=1,
+                bias=False,
+            ),
+            nn.BatchNorm2d(cfg.F2),
+            nn.ELU(),
+            nn.AvgPool2d((1, 8)),
+            nn.Dropout(cfg.dropout),
+        )
+
+        self._feature_dim = self._infer_feature_dim(cfg)
+
+    def _infer_feature_dim(self, cfg: LMEEGNetConfig) -> int:
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, cfg.n_channels, cfg.n_times)
+            x = self.block1(dummy)
+            x = self.block2(x)
+            return x.view(1, -1).shape[1]
+
+    @property
+    def feature_dim(self) -> int:
+        return self._feature_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected (B,C,T), got {tuple(x.shape)}")
+        x = x.unsqueeze(1)
+        x = self.block1(x)
+        x = self.block2(x)
+        return x.flatten(start_dim=1)
+
+    def max_norm_constraint(self) -> None:
+        for name, p in self.block1.named_parameters():
+            if name == "3.weight":
+                p.data = torch.renorm(p.data, p=2, dim=0, maxnorm=1.0)
+
+
 class EEGNetMI1MI2(nn.Module):
     """
     EEGNet feature extractor + Task head + User head
@@ -286,6 +388,49 @@ class EEGNetMI1MI2(nn.Module):
         *,
         return_features: bool = False,
         head: str = "both",  # "task" | "user" | "both"
+    ):
+        feat = self.backbone(x)
+        if head == "task":
+            out = self.task_head(feat)
+            return (out, feat) if return_features else out
+        if head == "user":
+            out = self.user_head(feat)
+            return (out, feat) if return_features else out
+        if head == "both":
+            task_logits = self.task_head(feat)
+            user_logits = self.user_head(feat)
+            return (task_logits, user_logits, feat) if return_features else (task_logits, user_logits)
+        raise ValueError(f"Unknown head={head!r}")
+
+
+class LMEEGNetMI1MI2(nn.Module):
+    """
+    LMEEGNet feature extractor + Task head + User head.
+    """
+    def __init__(
+        self,
+        cfg: LMEEGNetConfig,
+        n_task_classes: int,
+        n_users: int,
+        user_hidden_dim: int = 128,
+        user_dropout: float = 0.5,
+    ):
+        super().__init__()
+        self.backbone = LMEEGNetFeatureExtractor(cfg)
+        self.task_head = TaskClassifier(self.backbone.feature_dim, n_task_classes)
+        self.user_head = UserClassifier(
+            self.backbone.feature_dim,
+            n_users,
+            hidden_dim=user_hidden_dim,
+            dropout=user_dropout,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_features: bool = False,
+        head: str = "both",
     ):
         feat = self.backbone(x)
         if head == "task":

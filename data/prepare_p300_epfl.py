@@ -15,7 +15,10 @@ from scipy import signal
 
 RAW_SFREQ = 2048.0
 TARGET_SFREQ = 128.0
-PRE_FIRST_EVENT_SECONDS = 5.0
+# In the Hoffmann/EPFL raw files, event timestamps are already relative to the
+# EEG sample stream used in `data`. Adding an offset shifts epochs into later
+# non-stimulus samples and can even reach the trailing zero padding.
+PRE_FIRST_EVENT_SECONDS = 0.0
 EPOCH_SECONDS = 1.0
 
 # EEGDash/NeMAR metadata lists 34 recorded channels: 32 EEG + 2 misc.

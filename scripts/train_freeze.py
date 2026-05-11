@@ -12,10 +12,10 @@ import numpy as np
 import scipy.io as scio
 import torch
 from torch import nn
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 from dataclasses import asdict
 
-from models.EEGNet import EEGNetConfig, EEGNetMI1MI2, UserClassifier
+from models.EEGNet import EEGNetConfig, EEGNetMI1MI2, LMEEGNetConfig, LMEEGNetMI1MI2, UserClassifier
 from models.ShallowCNN import ShallowCNNConfig, ShallowCNNMI1MI2
 from scripts.euclidean_alignment import euclidean_align_trials
 
@@ -217,6 +217,19 @@ def build_model(ds: Dataset, user_hidden_dim: int, model_name: str) -> Tuple[nn.
         )
         return model, cfg
 
+    if model_name == "LMEEGNet":
+        cfg = LMEEGNetConfig(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+        )
+        model = LMEEGNetMI1MI2(
+            cfg,
+            n_task_classes=ds.n_task_classes,
+            n_users=ds.n_users,
+            user_hidden_dim=user_hidden_dim,
+        )
+        return model, cfg
+
     if model_name == "ShallowCNN":
         cfg = ShallowCNNConfig(
             n_channels=ds.n_channels,
@@ -232,7 +245,7 @@ def build_model(ds: Dataset, user_hidden_dim: int, model_name: str) -> Tuple[nn.
 
     raise ValueError(
         f"Unknown model={model_name!r}. "
-        f"Currently supported: ['EEGNet', 'ShallowCNN']"
+        f"Currently supported: ['EEGNet', 'LMEEGNet', 'ShallowCNN']"
     )
 
 
@@ -313,6 +326,21 @@ def compute_bca(
         nonzero = total_per_class > 0
         per_class_recall[nonzero] = correct_per_class[nonzero] / total_per_class[nonzero]
         return per_class_recall.mean().item()
+
+
+def make_task_balanced_sampler(ds: Dataset, indices: List[int]) -> WeightedRandomSampler:
+    labels = ds.y_task[indices].to(torch.long)
+    counts = torch.bincount(labels, minlength=ds.n_task_classes).to(torch.float32)
+    if torch.any(counts == 0):
+        missing = torch.where(counts == 0)[0].tolist()
+        raise ValueError(f"Cannot build balanced sampler; missing task classes in train split: {missing}")
+    weights_per_class = 1.0 / counts
+    sample_weights = weights_per_class[labels]
+    return WeightedRandomSampler(
+        weights=sample_weights.double(),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
 
 
 def freeze_module(module: nn.Module) -> None:
@@ -538,6 +566,12 @@ def build_model_config(ds: Dataset, model_name: str):
             n_times=ds.n_times,
         )
 
+    if model_name == "LMEEGNet":
+        return LMEEGNetConfig(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+        )
+
     if model_name == "ShallowCNN":
         return ShallowCNNConfig(
             n_channels=ds.n_channels,
@@ -567,7 +601,7 @@ def main():
         "--model",
         type=str,
         default="EEGNet",
-        choices=["EEGNet", "ShallowCNN"],
+        choices=["EEGNet", "LMEEGNet", "ShallowCNN"],
         help="Model backbone to use",
     )
 
@@ -612,6 +646,11 @@ def main():
         "--euclidean_align",
         action="store_true",
         help="Apply subject-wise Euclidean Alignment before optional z-score normalization.",
+    )
+    parser.add_argument(
+        "--task_balanced_sampler",
+        action="store_true",
+        help="Use inverse-frequency sampling for Stage 1 task training. Useful for imbalanced P300.",
     )
 
     args = parser.parse_args()
@@ -679,6 +718,7 @@ def main():
         "seeds": seeds,
         "normalize": args.normalize,
         "euclidean_align": args.euclidean_align,
+        "task_balanced_sampler": args.task_balanced_sampler,
         "model_config": model_cfg_dict,
         "user_head_config": user_head_cfg,
 
@@ -728,10 +768,12 @@ def main():
             train_set = Subset(ds, train_idx)
             test_set = Subset(ds, test_idx)
 
+            task_sampler = make_task_balanced_sampler(ds, train_idx) if args.task_balanced_sampler else None
             train_loader = DataLoader(
                 train_set,
                 batch_size=args.batch_size,
-                shuffle=True,
+                shuffle=task_sampler is None,
+                sampler=task_sampler,
                 num_workers=args.num_workers,
             )
             test_loader = DataLoader(

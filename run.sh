@@ -18,7 +18,7 @@ PYTHON=/home/ubuntu/miniconda3/envs/PP310/bin/python
 #   --run_name p300_eegnet_base
 
 # P300 two-stage baseline with subject-wise Euclidean Alignment.
-exec $PYTHON -m scripts.train \
+exec $PYTHON -u -m scripts.train \
   --dataset P300 \
   --model EEGNet \
   --task_epochs 100 \
@@ -26,10 +26,11 @@ exec $PYTHON -m scripts.train \
   --batch_size 8 \
   --task_lr 2e-3 \
   --user_lr 2e-3 \
-  --weight_decay 1e-4 \
+  --weight_decay 0 \
   --seeds 0 \
-  --normalize channel \
+  --normalize none \
   --euclidean_align \
+  --task_balanced_sampler \
   --run_name p300_eegnet_ea_channel
 
 # P300 user-only sanity check.
