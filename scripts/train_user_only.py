@@ -377,6 +377,13 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Training device. Use cpu to avoid CUDA compatibility issues.",
+    )
 
     parser.add_argument("--user_hidden_dim", type=int, default=128)
     parser.add_argument("--user_dropout", type=float, default=0.5)
@@ -400,7 +407,10 @@ def main():
     if len(seeds) != 5:
         print(f"[Warn] Paper says repeat 5 times, current seeds={seeds}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
 
     ds = MI1Dataset(
         args.mi1_dir,
@@ -547,10 +557,9 @@ def main():
                 print(
                     f"[UserOnly] Epoch {epoch:03d} | "
                     f"train_loss={row['train_loss']:.4f} | "
-                    f"train_USER_ACC={row['train_user_acc'] * 100:.2f}% | "
+                    f"train_UIA={row['train_uia'] * 100:.2f}% | "
                     f"train_USER_BCA={row['train_user_bca'] * 100:.2f}% | "
                     f"test_loss={row['test_loss']:.4f} | "
-                    f"test_USER_ACC={row['test_user_acc'] * 100:.2f}% | "
                     f"test_USER_BCA={row['test_user_bca'] * 100:.2f}% | "
                     f"test_UIA={row['test_uia'] * 100:.2f}%"
                 )
@@ -644,7 +653,6 @@ def main():
     print(f"Run dir: {run_dir}")
     print(f"Total runs: {len(all_fold_results)}")
     print()
-    print(f"Mean USER_ACC : {final_summary['mean_test_user_acc'] * 100:.2f}%")
     print(f"Mean UIA      : {final_summary['mean_test_uia'] * 100:.2f}%")
     print(f"Mean USER_BCA : {final_summary['mean_test_user_bca'] * 100:.2f}%")
     print("\nSaved:")

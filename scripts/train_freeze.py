@@ -333,6 +333,7 @@ def train_task_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    n_task_classes: int,
 ) -> Dict[str, float]:
     model.train()
     ce = nn.CrossEntropyLoss()
@@ -365,9 +366,13 @@ def train_task_one_epoch(
     y_true = torch.cat(all_true, dim=0)
     y_pred = torch.cat(all_pred, dim=0)
 
+    mi_acc = compute_accuracy(y_true, y_pred)
+    bca = compute_bca(y_true, y_pred, n_classes=n_task_classes)
+
     return {
         "loss": total_loss / total_samples,
-        "mi_acc": compute_accuracy(y_true, y_pred),
+        "mi_acc": mi_acc,
+        "bca": bca,
     }
 
 
@@ -583,6 +588,13 @@ def main():
     parser.add_argument("--user_hidden_dim", type=int, default=256)
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--user_dropout", type=float, default=0.5)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Training device. Use cpu to avoid CUDA compatibility issues.",
+    )
 
     parser.add_argument(
         "--seeds",
@@ -608,7 +620,10 @@ def main():
     if len(seeds) != 5:
         print(f"[Warn] Paper says repeat 5 times, current seeds={seeds}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
 
     # ---- dataset ----
     args.data_dir = "data/" + args.dataset
@@ -763,6 +778,7 @@ def main():
                     dataloader=train_loader,
                     optimizer=task_optimizer,
                     device=device,
+                    n_task_classes=ds.n_task_classes,
                 )
 
                 test_task_stats = evaluate_task(
@@ -782,6 +798,7 @@ def main():
                     "epoch": epoch,
                     "train_task_loss": train_task_stats["loss"],
                     "train_mi_acc": train_task_stats["mi_acc"],
+                    "train_bca": train_task_stats["bca"],
                     "test_task_loss": test_task_stats["loss"],
                     "test_mi_acc": test_task_stats["mi_acc"],
                     "test_bca": test_task_stats["bca"],
@@ -791,9 +808,8 @@ def main():
                 print(
                     f"[Task] Epoch {epoch:03d} | "
                     f"train_loss={row['train_task_loss']:.4f} | "
-                    f"train_MI_ACC={row['train_mi_acc'] * 100:.2f}% | "
+                    f"train_BCA={row['train_bca'] * 100:.2f}% | "
                     f"test_loss={row['test_task_loss']:.4f} | "
-                    f"test_MI_ACC={row['test_mi_acc'] * 100:.2f}% | "
                     f"test_BCA={row['test_bca'] * 100:.2f}%"
                 )
 
@@ -915,9 +931,8 @@ def main():
                 print(
                     f"[User] Epoch {epoch:03d} | "
                     f"train_loss={row['train_user_loss']:.4f} | "
-                    f"train_USER_ACC={row['train_user_acc'] * 100:.2f}% | "
+                    f"train_UIA={row['train_uia'] * 100:.2f}% | "
                     f"test_loss={row['test_user_loss']:.4f} | "
-                    f"test_USER_ACC={row['test_user_acc'] * 100:.2f}% | "
                     f"test_UIA={row['test_uia'] * 100:.2f}%"
                 )
 
@@ -1029,9 +1044,7 @@ def main():
     print(f"Run dir: {run_dir}")
     print(f"Total runs: {len(all_fold_results)}")
     print()
-    print(f"Mean MI_ACC   : {final_summary['mean_test_mi_acc'] * 100:.2f}%")
     print(f"Mean BCA      : {final_summary['mean_test_bca'] * 100:.2f}%")
-    print(f"Mean USER_ACC : {final_summary['mean_test_user_acc'] * 100:.2f}%")
     print(f"Mean UIA      : {final_summary['mean_test_uia'] * 100:.2f}%")
     print("\nSaved:")
     print(f"  - {run_dir / 'config.json'}")
