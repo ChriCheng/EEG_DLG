@@ -6,7 +6,7 @@ data/download.log
 data/MI1_obsolete/*
 checkpoint/*
 data/p300/*
-data/P300/*
+data/*
 TODO
 models/__pycache__/*
 scripts/__pycache__/*

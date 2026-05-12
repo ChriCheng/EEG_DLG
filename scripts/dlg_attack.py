@@ -26,6 +26,11 @@ def save_json(obj: Dict, path: Path) -> None:
         json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
+def save_text(text: str, path: Path) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def strip_module_prefix(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     if not any(k.startswith("module.") for k in state_dict):
         return state_dict
@@ -159,6 +164,35 @@ def identity_metrics(
 
 
 @torch.no_grad()
+def identity_details(
+    model: nn.Module,
+    x: torch.Tensor,
+    y_user: torch.Tensor,
+    topk: int,
+) -> List[Dict]:
+    model.eval()
+    logits = head_logits(model, x, head="user")
+    probs = F.softmax(logits, dim=1)
+    k = min(topk, probs.shape[1])
+    top_probs, top_idx = probs.topk(k=k, dim=1)
+    rows = []
+    for i in range(x.shape[0]):
+        true_user = int(y_user[i].item())
+        rows.append(
+            {
+                "sample_in_batch": i,
+                "true_user": true_user,
+                "pred_user": int(top_idx[i, 0].item()),
+                "true_user_conf": float(probs[i, true_user].item()),
+                "topk_users": [int(v) for v in top_idx[i].detach().cpu().tolist()],
+                "topk_probs": [float(v) for v in top_probs[i].detach().cpu().tolist()],
+                "true_user_in_topk": bool((top_idx[i] == y_user[i]).any().item()),
+            }
+        )
+    return rows
+
+
+@torch.no_grad()
 def task_accuracy(model: nn.Module, x: torch.Tensor, y_task: torch.Tensor) -> float:
     logits = head_logits(model, x, head="task")
     pred = logits.argmax(dim=1)
@@ -178,6 +212,88 @@ def select_indices(ds, split: str, train_session_internal: int | None, batch_siz
         raise ValueError(f"batch_size={batch_size} is larger than selected pool size={len(pool)}")
     rng = random.Random(seed)
     return rng.sample(pool, batch_size)
+
+
+def format_pct(value: float) -> str:
+    return f"{value * 100:.2f}%"
+
+
+def format_topk_row(row: Dict) -> str:
+    pairs = [
+        f"user{user}:{prob:.4f}"
+        for user, prob in zip(row["topk_users"], row["topk_probs"])
+    ]
+    hit = "yes" if row["true_user_in_topk"] else "no"
+    return (
+        f"sample={row['sample_in_batch']} true_user={row['true_user']} "
+        f"pred={row['pred_user']} hit_topk={hit} "
+        f"true_conf={row['true_user_conf']:.4f} topk=[{', '.join(pairs)}]"
+    )
+
+
+def format_summary_text(summary: Dict) -> str:
+    topk = summary["topk"]
+    topk_key = f"user_top{topk}_acc"
+    lines = [
+        "DLG EEG Summary",
+        "=" * 80,
+        f"dataset          : {summary['dataset']}",
+        f"model            : {summary['model']}",
+        f"checkpoint       : {summary['checkpoint']}",
+        f"checkpoint_epoch : {summary['checkpoint_epoch']}",
+        f"attack_head      : {summary['attack_head']}",
+        f"label_mode       : {summary['label_info']['label_mode']}",
+        f"batch_indices    : {summary['batch_indices']}",
+        f"y_task           : {summary['y_task']}",
+        f"y_user           : {summary['y_user']}",
+        f"random Top-{topk} : {format_pct(summary['random_topk_baseline'])}",
+        "",
+        "Aggregate Metrics",
+        "-" * 80,
+        f"{'input':<8} {'Top-1':>10} {('Top-' + str(topk)):>10} {'TrueConf':>12} {'TaskAcc':>10}",
+    ]
+    for name in ("real", "recon", "noise"):
+        metrics = summary["identity_metrics"][name]
+        lines.append(
+            f"{name:<8} "
+            f"{format_pct(metrics['user_top1_acc']):>10} "
+            f"{format_pct(metrics[topk_key]):>10} "
+            f"{metrics['true_user_conf']:>12.4f} "
+            f"{format_pct(metrics['task_acc']):>10}"
+        )
+
+    recon = summary["final_reconstruction"]
+    lines.extend(
+        [
+            "",
+            "Reconstruction",
+            "-" * 80,
+            f"mse              : {recon['mse']:.4f}",
+            f"corr             : {recon['corr']:.4f}",
+            "",
+            f"Top-{topk} Predictions",
+            "-" * 80,
+        ]
+    )
+    for name in ("real", "recon", "noise"):
+        lines.append(f"[{name}]")
+        for row in summary["identity_details"][name]:
+            lines.append(format_topk_row(row))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def format_topk_csv(summary: Dict) -> str:
+    lines = ["input,sample_in_batch,true_user,pred_user,true_user_conf,true_user_in_topk,rank,user,prob"]
+    for input_name in ("real", "recon", "noise"):
+        for row in summary["identity_details"][input_name]:
+            for rank, (user, prob) in enumerate(zip(row["topk_users"], row["topk_probs"]), start=1):
+                lines.append(
+                    f"{input_name},{row['sample_in_batch']},{row['true_user']},"
+                    f"{row['pred_user']},{row['true_user_conf']:.4f},"
+                    f"{int(row['true_user_in_topk'])},{rank},{user},{prob:.4f}"
+                )
+    return "\n".join(lines) + "\n"
 
 
 def run_dlg(args: argparse.Namespace) -> Dict:
@@ -343,7 +459,15 @@ def run_dlg(args: argparse.Namespace) -> Dict:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    detail_rows = {
+        "recon": identity_details(model, recon, y_user, topk),
+        "real": identity_details(model, x, y_user, topk),
+        "noise": identity_details(model, noise, y_user, topk),
+    }
+    summary["identity_details"] = detail_rows
     save_json(summary, out_dir / "summary.json")
+    save_text(format_summary_text(summary), out_dir / "summary.txt")
+    save_text(format_topk_csv(summary), out_dir / "topk_predictions.csv")
     torch.save(
         {
             "real_x": x.detach().cpu(),
@@ -357,6 +481,8 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         out_dir / "reconstruction.pt",
     )
     print(f"Saved {out_dir / 'summary.json'}")
+    print(f"Saved {out_dir / 'summary.txt'}")
+    print(f"Saved {out_dir / 'topk_predictions.csv'}")
     print(f"Saved {out_dir / 'reconstruction.pt'}")
     return summary
 
