@@ -335,7 +335,7 @@ def save_waveform_trajectory(
     for ax in axes.flat[len(snapshots):]:
         ax.axis("off")
     handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.suptitle("EEG waveform reconstruction trajectory", y=0.985)
+    fig.suptitle("single-channel EEG waveform reconstruction trajectory", y=0.985)
     fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.945))
     fig.tight_layout(rect=(0, 0, 1, 0.90))
     fig.savefig(path, dpi=180)
