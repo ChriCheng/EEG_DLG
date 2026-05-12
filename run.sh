@@ -22,16 +22,16 @@ exec $PYTHON -u -m scripts.train \
   --dataset P300 \
   --model EEGNet \
   --task_epochs 100 \
-  --user_epochs 100 \
+  --user_epochs 300 \
   --batch_size 8 \
   --task_lr 2e-3 \
   --user_lr 2e-3 \
   --weight_decay 0 \
   --seeds 0 \
-  --normalize none \
+  --normalize channel \
   --euclidean_align \
   --task_balanced_sampler \
-  --run_name p300_eegnet_ea_channel
+  --run_name p300_eegnet_channel
 
 # P300 user-only sanity check.
 # $PYTHON -m scripts.train_user_only \

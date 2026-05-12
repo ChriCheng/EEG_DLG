@@ -9,14 +9,15 @@ class ShallowCNNConfig:
     n_channels: int
     n_times: int
 
-    # classic shallow convnet / shallowfbcsp-like defaults
+    # Defaults match lbinmeng/EEG_Privacy_Protection ShallowConvNet.
     n_filters_time: int = 40
-    filter_time_length: int = 25
+    filter_time_length: int = 13
     n_filters_spat: int = 40
-    pool_time_length: int = 75
-    pool_time_stride: int = 15
+    pool_time_length: int = 35
+    pool_time_stride: int = 7
     dropout: float = 0.5
     batch_norm: bool = True
+    activation: str = "elu"
     log_eps: float = 1e-6
 
 
@@ -40,7 +41,7 @@ class ShallowCNNFeatureExtractor(nn.Module):
     Output: (B, feature_dim)
 
     Architecture:
-      temporal conv -> spatial conv -> BN -> square -> avgpool -> log -> dropout -> flatten
+      temporal conv -> spatial conv -> BN -> activation -> avgpool -> activation -> dropout -> flatten
     """
 
     def __init__(self, cfg: ShallowCNNConfig):
@@ -66,19 +67,37 @@ class ShallowCNNFeatureExtractor(nn.Module):
         )
 
         self.bn = nn.BatchNorm2d(cfg.n_filters_spat) if cfg.batch_norm else nn.Identity()
+        self.act1 = self._make_activation(cfg)
         self.square = Square()
         self.pool = nn.AvgPool2d(
             kernel_size=(1, cfg.pool_time_length),
             stride=(1, cfg.pool_time_stride),
         )
+        self.act2 = self._make_activation(cfg)
         self.log = SafeLog(cfg.log_eps)
         self.drop = nn.Dropout(cfg.dropout)
 
         self._feature_dim = self._infer_feature_dim(cfg)
 
     @staticmethod
+    def _make_activation(cfg: ShallowCNNConfig) -> nn.Module:
+        if cfg.activation == "elu":
+            return nn.ELU()
+        if cfg.activation == "square_log":
+            return nn.Identity()
+        raise ValueError(f"Unknown ShallowCNN activation={cfg.activation!r}")
+
+    @staticmethod
     def _build_conv_only(cfg: ShallowCNNConfig) -> nn.Sequential:
         bn = nn.BatchNorm2d(cfg.n_filters_spat) if cfg.batch_norm else nn.Identity()
+        if cfg.activation == "elu":
+            act1: nn.Module = nn.ELU()
+            act2: nn.Module = nn.ELU()
+        elif cfg.activation == "square_log":
+            act1 = Square()
+            act2 = SafeLog(cfg.log_eps)
+        else:
+            raise ValueError(f"Unknown ShallowCNN activation={cfg.activation!r}")
         return nn.Sequential(
             nn.Conv2d(
                 in_channels=1,
@@ -97,12 +116,12 @@ class ShallowCNNFeatureExtractor(nn.Module):
                 bias=not cfg.batch_norm,
             ),
             bn,
-            Square(),
+            act1,
             nn.AvgPool2d(
                 kernel_size=(1, cfg.pool_time_length),
                 stride=(1, cfg.pool_time_stride),
             ),
-            SafeLog(cfg.log_eps),
+            act2,
             nn.Dropout(cfg.dropout),
         )
 
@@ -134,11 +153,21 @@ class ShallowCNNFeatureExtractor(nn.Module):
         x = self.temporal_conv(x)   # (B, Ft, C, T')
         x = self.spatial_conv(x)    # (B, Fs, 1, T')
         x = self.bn(x)
-        x = self.square(x)
+        if self.cfg.activation == "square_log":
+            x = self.square(x)
+        else:
+            x = self.act1(x)
         x = self.pool(x)
-        x = self.log(x)
+        if self.cfg.activation == "square_log":
+            x = self.log(x)
+        else:
+            x = self.act2(x)
         x = self.drop(x)
         return x.flatten(start_dim=1)
+
+    def max_norm_constraint(self) -> None:
+        for module in (self.temporal_conv, self.spatial_conv):
+            module.weight.data = torch.renorm(module.weight.data, p=2, dim=0, maxnorm=2.0)
 
 
 class TaskClassifier(nn.Module):
@@ -152,24 +181,20 @@ class TaskClassifier(nn.Module):
 
 
 class UserClassifier(nn.Module):
-    """two fully-connected layers as User-Classifier"""
+    """two fully-connected layers as the paper's user discriminator."""
     def __init__(
         self,
         feature_dim: int,
         n_users: int,
-        hidden_dim: int = 128,
+        hidden_dim: int = 50,
         dropout: float = 0.5,
     ):
         super().__init__()
         self.fc1 = nn.Linear(feature_dim, hidden_dim)
-        self.act = nn.ELU()
-        self.drop = nn.Dropout(dropout)
         self.fc2 = nn.Linear(hidden_dim, n_users)
 
     def forward(self, feat: torch.Tensor) -> torch.Tensor:
         x = self.fc1(feat)
-        x = self.act(x)
-        x = self.drop(x)
         return self.fc2(x)
 
 

@@ -12,6 +12,7 @@ USER_LR=${USER_LR:-2e-3}
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}
 NORMALIZE=${NORMALIZE:-none}
 SAVE_ROOT=${SAVE_ROOT:-checkpoint/checkpoints_LMEEGNet}
+SPLIT_PROTOCOL=${SPLIT_PROTOCOL:-train_one_test_rest}
 
 run_one() {
   local model="$1"
@@ -23,7 +24,7 @@ run_one() {
   echo "[LMrun] dataset=${DATASET} model=${model} tag=${tag} normalize=${NORMALIZE}"
   echo "================================================================================"
 
-  "exec $PYTHON" -u -m scripts.train_freeze \
+  exec "$PYTHON" -u -m scripts.train_freeze \
     --dataset "$DATASET" \
     --model "$model" \
     --task_epochs "$TASK_EPOCHS" \
@@ -34,6 +35,7 @@ run_one() {
     --weight_decay "$WEIGHT_DECAY" \
     --seeds "$SEEDS" \
     --normalize "$NORMALIZE" \
+    --task_balanced_sampler \
     --save_root "$SAVE_ROOT" \
     --run_name "${DATASET}_${model}_${tag}" \
     "$@"

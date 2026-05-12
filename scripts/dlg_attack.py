@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+import argparse
+import json
+import random
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+import numpy as np
+import torch
+from torch import nn
+from torch.nn import functional as F
+
+from scripts.train import build_dataset, build_loso_split, build_model
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def save_json(obj: Dict, path: Path) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+
+
+def strip_module_prefix(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    if not any(k.startswith("module.") for k in state_dict):
+        return state_dict
+    return {k.removeprefix("module."): v for k, v in state_dict.items()}
+
+
+def infer_user_hidden_dim(state_dict: Dict[str, torch.Tensor], default: int) -> int:
+    weight = state_dict.get("user_head.fc1.weight")
+    if weight is None:
+        return default
+    return int(weight.shape[0])
+
+
+def load_checkpoint_model(
+    checkpoint_path: Path,
+    ds,
+    model_name: str,
+    user_hidden_dim: int,
+    user_dropout: float,
+    device: torch.device,
+) -> Tuple[nn.Module, Dict]:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = strip_module_prefix(checkpoint["model_state_dict"])
+    hidden_dim = infer_user_hidden_dim(state_dict, user_hidden_dim)
+    model, _ = build_model(
+        ds,
+        user_hidden_dim=hidden_dim,
+        model_name=model_name,
+        user_dropout=user_dropout,
+    )
+    model.load_state_dict(state_dict, strict=True)
+    model.to(device)
+    model.eval()
+    return model, checkpoint
+
+
+def soft_cross_entropy(logits: torch.Tensor, target_probs: torch.Tensor) -> torch.Tensor:
+    return torch.mean(torch.sum(-target_probs * F.log_softmax(logits, dim=1), dim=1))
+
+
+def named_trainable_parameters(model: nn.Module) -> List[Tuple[str, nn.Parameter]]:
+    return [(name, p) for name, p in model.named_parameters() if p.requires_grad]
+
+
+def head_logits(model: nn.Module, x: torch.Tensor, head: str) -> torch.Tensor:
+    out = model(x, head=head)
+    if isinstance(out, tuple):
+        raise ValueError(f"Expected logits for head={head!r}, got tuple output")
+    return out
+
+
+def gradients_from_batch(
+    model: nn.Module,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    head: str,
+    create_graph: bool,
+    named_params: List[Tuple[str, nn.Parameter]],
+) -> Tuple[torch.Tensor, List[torch.Tensor | None]]:
+    logits = head_logits(model, x, head=head)
+    loss = F.cross_entropy(logits, y)
+    params = [p for _, p in named_params]
+    grads = torch.autograd.grad(loss, params, create_graph=create_graph, allow_unused=True)
+    return loss, list(grads)
+
+
+def infer_idlg_label(
+    named_params: List[Tuple[str, nn.Parameter]],
+    target_grads: List[torch.Tensor],
+    head: str,
+) -> int:
+    candidates = []
+    prefix = f"{head}_head"
+    for (name, param), grad in zip(named_params, target_grads):
+        if grad is not None and name.startswith(prefix) and name.endswith("bias") and grad.ndim == 1:
+            candidates.append((name, grad.detach()))
+    if not candidates:
+        raise ValueError(f"Could not find a final bias gradient for head={head!r}")
+    _, bias_grad = candidates[-1]
+    return int(torch.argmin(bias_grad).item())
+
+
+def gradient_distance(
+    dummy_grads: Iterable[torch.Tensor | None],
+    target_grads: Iterable[torch.Tensor | None],
+) -> torch.Tensor:
+    grad_diff = None
+    for gx, gy in zip(dummy_grads, target_grads):
+        if gx is None or gy is None:
+            continue
+        if grad_diff is None:
+            grad_diff = torch.tensor(0.0, device=gx.device)
+        grad_diff = grad_diff + torch.sum((gx - gy) ** 2)
+    if grad_diff is None:
+        raise ValueError("No overlapping gradients were available for DLG matching")
+    return grad_diff
+
+
+def pearson_corr(x: torch.Tensor, y: torch.Tensor) -> float:
+    x_flat = x.detach().reshape(x.shape[0], -1).cpu()
+    y_flat = y.detach().reshape(y.shape[0], -1).cpu()
+    vals = []
+    for a, b in zip(x_flat, y_flat):
+        a = a - a.mean()
+        b = b - b.mean()
+        denom = torch.norm(a) * torch.norm(b)
+        vals.append(float((torch.dot(a, b) / (denom + 1e-12)).item()))
+    return float(np.mean(vals))
+
+
+@torch.no_grad()
+def identity_metrics(
+    model: nn.Module,
+    x: torch.Tensor,
+    y_user: torch.Tensor,
+    topk: int,
+) -> Dict[str, float]:
+    model.eval()
+    logits = head_logits(model, x, head="user")
+    probs = F.softmax(logits, dim=1)
+    k = min(topk, probs.shape[1])
+    top_idx = probs.topk(k=k, dim=1).indices
+    top1 = top_idx[:, 0]
+    true_in_topk = (top_idx == y_user[:, None]).any(dim=1)
+    true_conf = probs.gather(1, y_user[:, None]).squeeze(1)
+    return {
+        "user_top1_acc": float((top1 == y_user).float().mean().item()),
+        f"user_top{k}_acc": float(true_in_topk.float().mean().item()),
+        "true_user_conf": float(true_conf.mean().item()),
+    }
+
+
+@torch.no_grad()
+def task_accuracy(model: nn.Module, x: torch.Tensor, y_task: torch.Tensor) -> float:
+    logits = head_logits(model, x, head="task")
+    pred = logits.argmax(dim=1)
+    return float((pred == y_task).float().mean().item())
+
+
+def select_indices(ds, split: str, train_session_internal: int | None, batch_size: int, seed: int) -> List[int]:
+    if split == "all":
+        pool = list(range(len(ds)))
+    else:
+        if train_session_internal is None:
+            raise ValueError("--train_session_internal is required when --split is train or test")
+        train_idx, test_idx = build_loso_split(ds, train_session_internal)
+        pool = train_idx if split == "train" else test_idx
+
+    if batch_size > len(pool):
+        raise ValueError(f"batch_size={batch_size} is larger than selected pool size={len(pool)}")
+    rng = random.Random(seed)
+    return rng.sample(pool, batch_size)
+
+
+def run_dlg(args: argparse.Namespace) -> Dict:
+    set_seed(args.seed)
+    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device)
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ds = build_dataset(
+        dataset_name=args.dataset,
+        data_dir=args.data_dir,
+        normalize=args.normalize,
+        euclidean_align=args.euclidean_align,
+    )
+
+    model, checkpoint = load_checkpoint_model(
+        checkpoint_path=Path(args.checkpoint),
+        ds=ds,
+        model_name=args.model,
+        user_hidden_dim=args.user_hidden_dim,
+        user_dropout=args.user_dropout,
+        device=device,
+    )
+
+    ckpt_extra = checkpoint.get("extra", {})
+    train_session_internal = args.train_session_internal
+    if train_session_internal is None:
+        train_session_internal = ckpt_extra.get("train_session_internal")
+
+    indices = args.indices
+    if indices:
+        batch_indices = [int(v.strip()) for v in indices.split(",") if v.strip()]
+    else:
+        batch_indices = select_indices(
+            ds,
+            split=args.split,
+            train_session_internal=train_session_internal,
+            batch_size=args.batch_size,
+            seed=args.seed,
+        )
+
+    batch = [ds[i] for i in batch_indices]
+    x = torch.stack([item[0] for item in batch], dim=0).to(device)
+    y_task = torch.stack([item[1] for item in batch], dim=0).to(device)
+    y_user = torch.stack([item[2] for item in batch], dim=0).to(device)
+    attack_labels = y_task if args.attack_head == "task" else y_user
+
+    model.zero_grad(set_to_none=True)
+    named_params = named_trainable_parameters(model)
+    _, target_grads = gradients_from_batch(
+        model=model,
+        x=x,
+        y=attack_labels,
+        head=args.attack_head,
+        create_graph=False,
+        named_params=named_params,
+    )
+    target_grads = [None if g is None else g.detach() for g in target_grads]
+
+    if args.label_mode == "idlg":
+        if x.shape[0] != 1:
+            raise ValueError("iDLG label inference is only implemented for batch_size=1")
+        inferred = infer_idlg_label(named_params, target_grads, args.attack_head)
+        dummy_y = torch.tensor([inferred], dtype=torch.long, device=device)
+        dummy_label_logits = None
+    elif args.label_mode == "true":
+        dummy_y = attack_labels.detach()
+        dummy_label_logits = None
+    else:
+        num_classes = int(head_logits(model, x, head=args.attack_head).shape[1])
+        dummy_y = None
+        dummy_label_logits = torch.randn(x.shape[0], num_classes, device=device, requires_grad=True)
+
+    dummy_x = torch.randn_like(x, requires_grad=True)
+    opt_params = [dummy_x] if dummy_label_logits is None else [dummy_x, dummy_label_logits]
+
+    if args.optimizer == "lbfgs":
+        optimizer = torch.optim.LBFGS(opt_params, lr=args.lr, max_iter=20)
+    else:
+        optimizer = torch.optim.Adam(opt_params, lr=args.lr)
+
+    history = []
+    for it in range(args.iters):
+        def closure() -> torch.Tensor:
+            optimizer.zero_grad(set_to_none=True)
+            logits = head_logits(model, dummy_x, head=args.attack_head)
+            if dummy_label_logits is None:
+                loss = F.cross_entropy(logits, dummy_y)
+            else:
+                loss = soft_cross_entropy(logits, F.softmax(dummy_label_logits, dim=1))
+            params = [p for _, p in named_params]
+            dummy_grads = torch.autograd.grad(loss, params, create_graph=True, allow_unused=True)
+            grad_loss = gradient_distance(dummy_grads, target_grads)
+            grad_loss.backward()
+            return grad_loss
+
+        if args.optimizer == "lbfgs":
+            grad_loss = optimizer.step(closure)
+        else:
+            grad_loss = closure()
+            optimizer.step()
+
+        if it % args.log_every == 0 or it == args.iters - 1:
+            with torch.no_grad():
+                mse = F.mse_loss(dummy_x, x).item()
+                corr = pearson_corr(dummy_x, x)
+                history.append(
+                    {
+                        "iter": it,
+                        "grad_loss": float(grad_loss.item()),
+                        "mse": float(mse),
+                        "corr": float(corr),
+                    }
+                )
+                print(
+                    f"[DLG] iter={it:04d} grad_loss={grad_loss.item():.6f} "
+                    f"mse={mse:.6f} corr={corr:.4f}"
+                )
+
+    recon = dummy_x.detach()
+    noise = torch.randn_like(x)
+    topk = min(args.topk, ds.n_users)
+    metrics = {
+        "recon": identity_metrics(model, recon, y_user, topk),
+        "real": identity_metrics(model, x, y_user, topk),
+        "noise": identity_metrics(model, noise, y_user, topk),
+    }
+    metrics["recon"]["task_acc"] = task_accuracy(model, recon, y_task)
+    metrics["real"]["task_acc"] = task_accuracy(model, x, y_task)
+    metrics["noise"]["task_acc"] = task_accuracy(model, noise, y_task)
+
+    label_info = {
+        "attack_labels": attack_labels.detach().cpu().tolist(),
+        "label_mode": args.label_mode,
+    }
+    if dummy_label_logits is not None:
+        label_info["optimized_labels"] = dummy_label_logits.detach().argmax(dim=1).cpu().tolist()
+    elif args.label_mode == "idlg":
+        label_info["idlg_inferred_labels"] = dummy_y.detach().cpu().tolist()
+
+    summary = {
+        "dataset": args.dataset,
+        "model": args.model,
+        "checkpoint": str(args.checkpoint),
+        "checkpoint_epoch": checkpoint.get("epoch"),
+        "checkpoint_extra": ckpt_extra,
+        "attack_head": args.attack_head,
+        "batch_indices": batch_indices,
+        "train_session_internal": train_session_internal,
+        "split": args.split,
+        "topk": topk,
+        "random_topk_baseline": float(topk / ds.n_users),
+        "y_task": y_task.detach().cpu().tolist(),
+        "y_user": y_user.detach().cpu().tolist(),
+        "label_info": label_info,
+        "final_reconstruction": {
+            "mse": float(F.mse_loss(recon, x).item()),
+            "corr": pearson_corr(recon, x),
+        },
+        "identity_metrics": metrics,
+        "history": history,
+    }
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_json(summary, out_dir / "summary.json")
+    torch.save(
+        {
+            "real_x": x.detach().cpu(),
+            "recon_x": recon.detach().cpu(),
+            "noise_x": noise.detach().cpu(),
+            "y_task": y_task.detach().cpu(),
+            "y_user": y_user.detach().cpu(),
+            "batch_indices": batch_indices,
+            "history": history,
+        },
+        out_dir / "reconstruction.pt",
+    )
+    print(f"Saved {out_dir / 'summary.json'}")
+    print(f"Saved {out_dir / 'reconstruction.pt'}")
+    return summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Simple DLG/iDLG attack for EEG checkpoints")
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--dataset", type=str, default="P300")
+    parser.add_argument("--data_dir", type=str, default="data/P300")
+    parser.add_argument("--model", type=str, default="EEGNet", choices=["EEGNet", "LMEEGNet", "ShallowCNN"])
+    parser.add_argument("--normalize", type=str, default="channel", choices=["none", "trial", "channel"])
+    parser.add_argument("--euclidean_align", action="store_true")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"])
+    parser.add_argument("--train_session_internal", type=int, default=None)
+    parser.add_argument("--indices", type=str, default="")
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--attack_head", type=str, default="task", choices=["task", "user"])
+    parser.add_argument("--label_mode", type=str, default="idlg", choices=["idlg", "true", "dlg"])
+    parser.add_argument("--iters", type=int, default=300)
+    parser.add_argument("--lr", type=float, default=1.0)
+    parser.add_argument("--optimizer", type=str, default="lbfgs", choices=["lbfgs", "adam"])
+    parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument("--user_hidden_dim", type=int, default=256)
+    parser.add_argument("--user_dropout", type=float, default=0.5)
+    parser.add_argument("--out_dir", type=str, default="checkpoint/dlg_attack")
+    args = parser.parse_args()
+    run_dlg(args)
+
+
+if __name__ == "__main__":
+    main()

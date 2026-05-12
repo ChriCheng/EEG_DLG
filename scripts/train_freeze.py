@@ -201,7 +201,12 @@ def build_dataset(
     )
 
 
-def build_model(ds: Dataset, user_hidden_dim: int, model_name: str) -> Tuple[nn.Module, Any]:
+def build_model(
+    ds: Dataset,
+    user_hidden_dim: int,
+    model_name: str,
+    user_dropout: float = 0.5,
+) -> Tuple[nn.Module, Any]:
     model_name = model_name.strip()
 
     if model_name == "EEGNet":
@@ -240,6 +245,7 @@ def build_model(ds: Dataset, user_hidden_dim: int, model_name: str) -> Tuple[nn.
             n_task_classes=ds.n_task_classes,
             n_users=ds.n_users,
             user_hidden_dim=user_hidden_dim,
+            user_dropout=user_dropout,
         )
         return model, cfg
 
@@ -343,6 +349,21 @@ def make_task_balanced_sampler(ds: Dataset, indices: List[int]) -> WeightedRando
     )
 
 
+def make_user_balanced_sampler(ds: Dataset, indices: List[int]) -> WeightedRandomSampler:
+    labels = ds.y_user[indices].to(torch.long)
+    counts = torch.bincount(labels, minlength=ds.n_users).to(torch.float32)
+    if torch.any(counts == 0):
+        missing = torch.where(counts == 0)[0].tolist()
+        raise ValueError(f"Cannot build user-balanced sampler; missing users in train split: {missing}")
+    weights_per_class = 1.0 / counts
+    sample_weights = weights_per_class[labels]
+    return WeightedRandomSampler(
+        weights=sample_weights.double(),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+
+
 def freeze_module(module: nn.Module) -> None:
     for p in module.parameters():
         p.requires_grad = False
@@ -351,6 +372,26 @@ def freeze_module(module: nn.Module) -> None:
 def unfreeze_module(module: nn.Module) -> None:
     for p in module.parameters():
         p.requires_grad = True
+
+
+def apply_max_norm_constraints(model: nn.Module, *, include_task_head: bool = False) -> None:
+    backbone = getattr(model, "backbone", None)
+    if backbone is not None and hasattr(backbone, "max_norm_constraint"):
+        backbone.max_norm_constraint()
+    if include_task_head:
+        task_head = getattr(model, "task_head", None)
+        if task_head is not None and hasattr(task_head, "max_norm_constraint"):
+            task_head.max_norm_constraint()
+
+
+def adjust_learning_rate(optimizer: torch.optim.Optimizer, base_lr: float, epoch: int) -> None:
+    lr = base_lr
+    if epoch >= 100:
+        lr = base_lr * 0.01
+    elif epoch >= 50:
+        lr = base_lr * 0.1
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
 
 
 # =========================
@@ -382,6 +423,7 @@ def train_task_one_epoch(
 
         loss.backward()
         optimizer.step()
+        apply_max_norm_constraints(model, include_task_head=True)
 
         bs = x.size(0)
         total_samples += bs
@@ -494,6 +536,7 @@ def train_user_one_epoch(
 
         loss.backward()
         optimizer.step()
+        apply_max_norm_constraints(model)
 
         bs = x.size(0)
         total_samples += bs
@@ -769,11 +812,18 @@ def main():
             test_set = Subset(ds, test_idx)
 
             task_sampler = make_task_balanced_sampler(ds, train_idx) if args.task_balanced_sampler else None
-            train_loader = DataLoader(
+            user_sampler = make_user_balanced_sampler(ds, train_idx)
+            task_train_loader = DataLoader(
                 train_set,
                 batch_size=args.batch_size,
                 shuffle=task_sampler is None,
                 sampler=task_sampler,
+                num_workers=args.num_workers,
+            )
+            user_train_loader = DataLoader(
+                train_set,
+                batch_size=args.batch_size,
+                sampler=user_sampler,
                 num_workers=args.num_workers,
             )
             test_loader = DataLoader(
@@ -793,6 +843,7 @@ def main():
                 ds,
                 user_hidden_dim=args.user_hidden_dim,
                 model_name=args.model,
+                user_dropout=args.user_dropout,
             )
             model = model.to(device)
 
@@ -815,9 +866,10 @@ def main():
 
             print("\n[Stage 1] Train task model")
             for epoch in range(1, args.task_epochs + 1):
+                adjust_learning_rate(task_optimizer, args.task_lr, epoch)
                 train_task_stats = train_task_one_epoch(
                     model=model,
-                    dataloader=train_loader,
+                    dataloader=task_train_loader,
                     optimizer=task_optimizer,
                     device=device,
                     n_task_classes=ds.n_task_classes,
@@ -940,9 +992,10 @@ def main():
             user_history = []
 
             for epoch in range(1, args.user_epochs + 1):
+                adjust_learning_rate(user_optimizer, args.user_lr, epoch)
                 train_user_stats = train_user_one_epoch(
                     model=model,
-                    dataloader=train_loader,
+                    dataloader=user_train_loader,
                     optimizer=user_optimizer,
                     device=device,
                 )
