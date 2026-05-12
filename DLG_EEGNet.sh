@@ -11,18 +11,20 @@ EUCLIDEAN_ALIGN=${EUCLIDEAN_ALIGN:-1}
 DEVICE=${DEVICE:-auto}
 
 SEED=${SEED:-0}
-TRAIN_SESSION=${TRAIN_SESSION:-1}
+TRAIN_SESSION=${TRAIN_SESSION:-3}
 CHECKPOINT=${CHECKPOINT:-checkpoint/checkpoints_2stage_EEGNet/p300_eegnet_channel/seed_${SEED}_train_session_${TRAIN_SESSION}/best_user_by_acc.pth}
 
 BATCH_SIZE=${BATCH_SIZE:-1}
 SPLIT=${SPLIT:-train}
 ATTACK_HEAD=${ATTACK_HEAD:-task}
 LABEL_MODE=${LABEL_MODE:-idlg}
-ITERS=${ITERS:-300}
+ITERS=${ITERS:-30}
 LR=${LR:-1.0}
 OPTIMIZER=${OPTIMIZER:-lbfgs}
-LOG_EVERY=${LOG_EVERY:-10}
+LOG_EVERY=${LOG_EVERY:-3}
 TOPK=${TOPK:-3}
+PLOT_CHANNEL=${PLOT_CHANNEL:--1}
+SFREQ=${SFREQ:-128}
 
 USER_HIDDEN_DIM=${USER_HIDDEN_DIM:-256}
 USER_DROPOUT=${USER_DROPOUT:-0.5}
@@ -57,6 +59,8 @@ exec "$PYTHON" -u -m scripts.dlg_attack \
   --optimizer "$OPTIMIZER" \
   --log_every "$LOG_EVERY" \
   --topk "$TOPK" \
+  --plot_channel "$PLOT_CHANNEL" \
+  --sfreq "$SFREQ" \
   --user_hidden_dim "$USER_HIDDEN_DIM" \
   --user_dropout "$USER_DROPOUT" \
   --out_dir "$OUT_DIR" \
