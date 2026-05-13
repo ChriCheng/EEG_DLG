@@ -27,6 +27,8 @@ LOG_EVERY=${LOG_EVERY:-2}
 TOPK=${TOPK:-3}
 PLOT_CHANNEL=${PLOT_CHANNEL:--1}
 SFREQ=${SFREQ:-128}
+WAVEFORM_GRID=${WAVEFORM_GRID:-0}
+WAVEFORM_FONT_SIZE=${WAVEFORM_FONT_SIZE:-16}
 EPSILON=${EPSILON:-0}
 TRIAL_LAPLACE_SENSITIVITY=${TRIAL_LAPLACE_SENSITIVITY:-1.0}
 
@@ -66,11 +68,15 @@ if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
   EXTRA_ARGS+=(--trial_laplace_epsilon "$EPSILON")
   EXTRA_ARGS+=(--trial_laplace_sensitivity "$TRIAL_LAPLACE_SENSITIVITY")
 fi
+if [[ "$WAVEFORM_GRID" == "0" || "$WAVEFORM_GRID" == "false" || "$WAVEFORM_GRID" == "False" || "$WAVEFORM_GRID" == "off" || "$WAVEFORM_GRID" == "no" ]]; then
+  EXTRA_ARGS+=(--no-waveform_grid)
+fi
 
 echo
 echo "================================================================================"
 echo "[DLG_EEGNet] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
 echo "[DLG_EEGNet] split=${SPLIT} eval_session=${EVAL_SESSION:-all} indices=${INDICES:-random} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
+echo "[DLG_EEGNet] plot_channel=${PLOT_CHANNEL} waveform_grid=${WAVEFORM_GRID} waveform_font_size=${WAVEFORM_FONT_SIZE}"
 echo "[DLG_EEGNet] trial_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
 echo "[DLG_EEGNet] out_dir=${OUT_DIR}"
 echo "================================================================================"
@@ -94,6 +100,7 @@ exec "$PYTHON" -u -m scripts.dlg_attack \
   --topk "$TOPK" \
   --plot_channel "$PLOT_CHANNEL" \
   --sfreq "$SFREQ" \
+  --waveform_font_size "$WAVEFORM_FONT_SIZE" \
   --user_hidden_dim "$USER_HIDDEN_DIM" \
   --user_dropout "$USER_DROPOUT" \
   --out_dir "$OUT_DIR" \

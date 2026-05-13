@@ -270,7 +270,14 @@ def choose_channel(real_x: torch.Tensor, requested_channel: int) -> int:
     return int(torch.var(real_x, dim=1).argmax().item())
 
 
-def plot_waveform_grid(rows: List[Dict], out_dir: Path, plot_channel: int, sfreq: float) -> str:
+def plot_waveform_grid(
+    rows: List[Dict],
+    out_dir: Path,
+    plot_channel: int,
+    sfreq: float,
+    show_grid: bool,
+    font_size: float,
+) -> str:
     cols = min(4, len(rows))
     rows_n = math.ceil(len(rows) / cols)
     fig, axes = plt.subplots(rows_n, cols, figsize=(4.8 * cols, 3.0 * rows_n), squeeze=False)
@@ -291,17 +298,21 @@ def plot_waveform_grid(rows: List[Dict], out_dir: Path, plot_channel: int, sfreq
         recon = recon_x[channel].numpy()
         ax.plot(time_ms, target, linewidth=1.5, color="#111111")
         ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9)
-        ax.set_xlabel("Time (ms)")
-        ax.set_ylabel("Amplitude (a.u.)")
-        ax.grid(alpha=0.22)
+        ax.set_xlabel("Time (ms)", fontsize=font_size)
+        ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        ax.tick_params(axis="both", labelsize=font_size)
+        if show_grid:
+            ax.grid(alpha=0.22)
 
         panel_path = panel_dir / f"trial_{row['trial_index']}_user_{row['user']:02d}.png"
         panel_fig, panel_ax = plt.subplots(figsize=(4.8, 3.0))
         panel_ax.plot(time_ms, target, linewidth=1.5, color="#111111")
         panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9)
-        panel_ax.set_xlabel("Time (ms)")
-        panel_ax.set_ylabel("Amplitude (a.u.)")
-        panel_ax.grid(alpha=0.22)
+        panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
+        panel_ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        panel_ax.tick_params(axis="both", labelsize=font_size)
+        if show_grid:
+            panel_ax.grid(alpha=0.22)
         panel_fig.tight_layout()
         panel_fig.savefig(panel_path, dpi=180)
         plt.close(panel_fig)
@@ -428,6 +439,19 @@ def main() -> None:
     parser.add_argument("--user_dropout", type=float, default=0.5)
     parser.add_argument("--plot_channel", type=int, default=-1)
     parser.add_argument("--sfreq", type=float, default=128.0)
+    parser.add_argument(
+        "--waveform_grid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show background grid lines on waveform plots.",
+    )
+    parser.add_argument("--no_waveform_grid", dest="waveform_grid", action="store_false", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--waveform_font_size",
+        type=float,
+        default=10.0,
+        help="Font size for waveform axis labels and tick labels.",
+    )
     parser.add_argument("--skip_figures", action="store_true")
     parser.add_argument("--keep_trial_artifacts", action="store_true")
     parser.add_argument("--max_trials", type=int, default=0, help="Limit the number of selected trials; 0 means all.")
@@ -523,7 +547,14 @@ def main() -> None:
     figure_paths = {}
     if not args.skip_figures:
         figure_paths = {
-            "waveform_grid": plot_waveform_grid(rows, out_dir, args.plot_channel, args.sfreq),
+            "waveform_grid": plot_waveform_grid(
+                rows,
+                out_dir,
+                args.plot_channel,
+                args.sfreq,
+                args.waveform_grid,
+                args.waveform_font_size,
+            ),
             "quality_bars": plot_quality_bars(rows, out_dir),
             "identity_leakage_bars": plot_leakage_bars(rows, out_dir, args.topk),
         }

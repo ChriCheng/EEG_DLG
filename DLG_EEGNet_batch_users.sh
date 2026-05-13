@@ -42,6 +42,8 @@ USER_HIDDEN_DIM=${USER_HIDDEN_DIM:-256}
 USER_DROPOUT=${USER_DROPOUT:-0.5}
 PLOT_CHANNEL=${PLOT_CHANNEL:--1}
 SFREQ=${SFREQ:-128}
+WAVEFORM_GRID=${WAVEFORM_GRID:-1}
+WAVEFORM_FONT_SIZE=${WAVEFORM_FONT_SIZE:-10}
 EPSILON_TAG=${EPSILON//./p}
 EPSILON_TAG=${EPSILON_TAG//-/m}
 EPSILON_TAG=${EPSILON_TAG//+/p}
@@ -68,12 +70,16 @@ if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
   EXTRA_ARGS+=(--trial_laplace_epsilon "$EPSILON")
   EXTRA_ARGS+=(--trial_laplace_sensitivity "$TRIAL_LAPLACE_SENSITIVITY")
 fi
+if [[ "$WAVEFORM_GRID" == "0" || "$WAVEFORM_GRID" == "false" || "$WAVEFORM_GRID" == "False" || "$WAVEFORM_GRID" == "off" || "$WAVEFORM_GRID" == "no" ]]; then
+  EXTRA_ARGS+=(--no-waveform_grid)
+fi
 
 echo
 echo "================================================================================"
 echo "[DLG_EEGNet_batch_users] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
 echo "[DLG_EEGNet_batch_users] selection=${SELECTION} | split=${SPLIT} eval_session=${EVAL_SESSION:-all} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE}"
 echo "[DLG_EEGNet_batch_users] iters=${ITERS} log_every=${LOG_EVERY} max_trials=${MAX_TRIALS} start_offset=${START_OFFSET} out_dir=${OUT_DIR}"
+echo "[DLG_EEGNet_batch_users] plot_channel=${PLOT_CHANNEL} waveform_grid=${WAVEFORM_GRID} waveform_font_size=${WAVEFORM_FONT_SIZE}"
 echo "[DLG_EEGNet_batch_users] trial_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
 echo "================================================================================"
 
@@ -98,6 +104,7 @@ exec "$PYTHON" -u -m scripts.dlg_batch_users \
   --user_dropout "$USER_DROPOUT" \
   --plot_channel "$PLOT_CHANNEL" \
   --sfreq "$SFREQ" \
+  --waveform_font_size "$WAVEFORM_FONT_SIZE" \
   --max_trials "$MAX_TRIALS" \
   --start_offset "$START_OFFSET" \
   --out_dir "$OUT_DIR" \

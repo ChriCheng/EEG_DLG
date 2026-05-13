@@ -391,6 +391,8 @@ def save_waveform_trajectory(
     path: Path,
     plot_channel: int,
     sfreq: float,
+    show_grid: bool,
+    font_size: float,
 ) -> Tuple[int, List[str]]:
     channel = choose_plot_channel(real_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
@@ -403,18 +405,22 @@ def save_waveform_trajectory(
         recon = snapshot["tensor"][channel].detach().cpu().numpy()
         ax.plot(time_ms, target, linewidth=1.7, color="#111111")
         ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92)
-        ax.set_xlabel("Time (ms)")
-        ax.set_ylabel("Amplitude (a.u.)")
-        ax.grid(alpha=0.22)
+        ax.set_xlabel("Time (ms)", fontsize=font_size)
+        ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        ax.tick_params(axis="both", labelsize=font_size)
+        if show_grid:
+            ax.grid(alpha=0.22)
 
         label = str(snapshot["label"]).replace(" ", "_").replace("/", "_")
         panel_path = path.with_name(f"{path.stem}_{label}{path.suffix}")
         panel_fig, panel_ax = plt.subplots(figsize=(5.2, 3.4))
         panel_ax.plot(time_ms, target, linewidth=1.7, color="#111111")
         panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92)
-        panel_ax.set_xlabel("Time (ms)")
-        panel_ax.set_ylabel("Amplitude (a.u.)")
-        panel_ax.grid(alpha=0.22)
+        panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
+        panel_ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        panel_ax.tick_params(axis="both", labelsize=font_size)
+        if show_grid:
+            panel_ax.grid(alpha=0.22)
         panel_fig.tight_layout()
         panel_fig.savefig(panel_path, dpi=180)
         plt.close(panel_fig)
@@ -677,9 +683,13 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             path=waveform_path,
             plot_channel=args.plot_channel,
             sfreq=args.sfreq,
+            show_grid=args.waveform_grid,
+            font_size=args.waveform_font_size,
         )
         summary["visualization"] = {
             "plot_channel": plot_channel,
+            "waveform_grid": args.waveform_grid,
+            "waveform_font_size": args.waveform_font_size,
             "waveform_trajectory_png": str(waveform_path),
             "waveform_panel_pngs": panel_paths,
         }
@@ -769,6 +779,19 @@ def main() -> None:
         help="Channel index for waveform panels; -1 picks the target channel with the largest variance.",
     )
     parser.add_argument("--sfreq", type=float, default=128.0, help="Sampling rate used for waveform x-axis in ms.")
+    parser.add_argument(
+        "--waveform_grid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show background grid lines on waveform plots.",
+    )
+    parser.add_argument("--no_waveform_grid", dest="waveform_grid", action="store_false", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--waveform_font_size",
+        type=float,
+        default=10.0,
+        help="Font size for waveform axis labels and tick labels.",
+    )
     parser.add_argument("--out_dir", type=str, default="checkpoint/dlg_attack")
     parser.add_argument(
         "--append_indices_to_out_dir",
