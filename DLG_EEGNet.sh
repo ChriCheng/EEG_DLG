@@ -15,21 +15,39 @@ TRAIN_SESSION=${TRAIN_SESSION:-3}
 CHECKPOINT=${CHECKPOINT:-checkpoint/checkpoints_2stage_EEGNet/p300_eegnet_channel/seed_${SEED}_train_session_${TRAIN_SESSION}/best_user_by_acc.pth}
 
 BATCH_SIZE=${BATCH_SIZE:-1}
-SPLIT=${SPLIT:-train}
+INDICES=${INDICES:-}
+SPLIT=${SPLIT:-test}
 EVAL_SESSION=${EVAL_SESSION:-}
 ATTACK_HEAD=${ATTACK_HEAD:-task}
 LABEL_MODE=${LABEL_MODE:-idlg}
-ITERS=${ITERS:-33}
+ITERS=${ITERS:-30}
 LR=${LR:-1.0}
 OPTIMIZER=${OPTIMIZER:-lbfgs}
-LOG_EVERY=${LOG_EVERY:-3}
+LOG_EVERY=${LOG_EVERY:-2}
 TOPK=${TOPK:-3}
 PLOT_CHANNEL=${PLOT_CHANNEL:--1}
 SFREQ=${SFREQ:-128}
+EPSILON=${EPSILON:-0}
+TRIAL_LAPLACE_SENSITIVITY=${TRIAL_LAPLACE_SENSITIVITY:-1.0}
 
 USER_HIDDEN_DIM=${USER_HIDDEN_DIM:-256}
 USER_DROPOUT=${USER_DROPOUT:-0.5}
-OUT_DIR=${OUT_DIR:-checkpoint/dlg_attack/${DATASET}_${MODEL}_${ATTACK_HEAD}_${LABEL_MODE}_seed${SEED}_session${TRAIN_SESSION}}
+EVAL_TAG=${EVAL_SESSION:-4}
+INDICES_TAG=${INDICES:-random}
+INDICES_TAG=${INDICES_TAG//,/p}
+INDICES_TAG=${INDICES_TAG// /}
+EPSILON_TAG=${EPSILON//./p}
+EPSILON_TAG=${EPSILON_TAG//-/m}
+EPSILON_TAG=${EPSILON_TAG//+/p}
+SENSITIVITY_TAG=${TRIAL_LAPLACE_SENSITIVITY//./p}
+SENSITIVITY_TAG=${SENSITIVITY_TAG//-/m}
+SENSITIVITY_TAG=${SENSITIVITY_TAG//+/p}
+DP_TAG="eps${EPSILON_TAG}_sens${SENSITIVITY_TAG}"
+AUTO_OUT_DIR=0
+if [[ -z "${OUT_DIR:-}" ]]; then
+  AUTO_OUT_DIR=1
+  OUT_DIR=checkpoint/dlg_attack/${DATASET}_${MODEL}_${ATTACK_HEAD}_${LABEL_MODE}_seed${SEED}_train${TRAIN_SESSION}_split${SPLIT}_eval${EVAL_TAG}_batch${BATCH_SIZE}_trial${INDICES_TAG}_${DP_TAG}
+fi
 
 EXTRA_ARGS=()
 if [[ "$EUCLIDEAN_ALIGN" == "1" || "$EUCLIDEAN_ALIGN" == "true" ]]; then
@@ -38,11 +56,22 @@ fi
 if [[ -n "$EVAL_SESSION" ]]; then
   EXTRA_ARGS+=(--eval_session_original "$EVAL_SESSION")
 fi
+if [[ -n "$INDICES" ]]; then
+  EXTRA_ARGS+=(--indices "$INDICES")
+fi
+if [[ "$AUTO_OUT_DIR" == "1" ]]; then
+  EXTRA_ARGS+=(--append_indices_to_out_dir)
+fi
+if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
+  EXTRA_ARGS+=(--trial_laplace_epsilon "$EPSILON")
+  EXTRA_ARGS+=(--trial_laplace_sensitivity "$TRIAL_LAPLACE_SENSITIVITY")
+fi
 
 echo
 echo "================================================================================"
 echo "[DLG_EEGNet] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
-echo "[DLG_EEGNet] split=${SPLIT} eval_session=${EVAL_SESSION:-all} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
+echo "[DLG_EEGNet] split=${SPLIT} eval_session=${EVAL_SESSION:-all} indices=${INDICES:-random} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
+echo "[DLG_EEGNet] trial_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
 echo "[DLG_EEGNet] out_dir=${OUT_DIR}"
 echo "================================================================================"
 

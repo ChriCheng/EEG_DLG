@@ -35,12 +35,21 @@ SKIP_FIGURES=${SKIP_FIGURES:-1}
 KEEP_TRIAL_ARTIFACTS=${KEEP_TRIAL_ARTIFACTS:-0}
 MAX_TRIALS=${MAX_TRIALS:-0}
 START_OFFSET=${START_OFFSET:-0}
+EPSILON=${EPSILON:-0}
+TRIAL_LAPLACE_SENSITIVITY=${TRIAL_LAPLACE_SENSITIVITY:-1.0}
 
 USER_HIDDEN_DIM=${USER_HIDDEN_DIM:-256}
 USER_DROPOUT=${USER_DROPOUT:-0.5}
 PLOT_CHANNEL=${PLOT_CHANNEL:--1}
 SFREQ=${SFREQ:-128}
-OUT_DIR=${OUT_DIR:-checkpoint/dlg_attack_batch/${DATASET}_${MODEL}_${ATTACK_HEAD}_${LABEL_MODE}_seed${SEED}_train${TRAIN_SESSION}_eval${EVAL_SESSION:-all}_${SELECTION}}
+EPSILON_TAG=${EPSILON//./p}
+EPSILON_TAG=${EPSILON_TAG//-/m}
+EPSILON_TAG=${EPSILON_TAG//+/p}
+SENSITIVITY_TAG=${TRIAL_LAPLACE_SENSITIVITY//./p}
+SENSITIVITY_TAG=${SENSITIVITY_TAG//-/m}
+SENSITIVITY_TAG=${SENSITIVITY_TAG//+/p}
+DP_TAG="eps${EPSILON_TAG}_sens${SENSITIVITY_TAG}"
+OUT_DIR=${OUT_DIR:-checkpoint/dlg_attack_batch/${DATASET}_${MODEL}_${ATTACK_HEAD}_${LABEL_MODE}_seed${SEED}_train${TRAIN_SESSION}_eval${EVAL_SESSION:-all}_${SELECTION}_${DP_TAG}}
 
 EXTRA_ARGS=()
 if [[ "$EUCLIDEAN_ALIGN" == "1" || "$EUCLIDEAN_ALIGN" == "true" ]]; then
@@ -55,12 +64,17 @@ fi
 if [[ "$KEEP_TRIAL_ARTIFACTS" == "1" || "$KEEP_TRIAL_ARTIFACTS" == "true" ]]; then
   EXTRA_ARGS+=(--keep_trial_artifacts)
 fi
+if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
+  EXTRA_ARGS+=(--trial_laplace_epsilon "$EPSILON")
+  EXTRA_ARGS+=(--trial_laplace_sensitivity "$TRIAL_LAPLACE_SENSITIVITY")
+fi
 
 echo
 echo "================================================================================"
 echo "[DLG_EEGNet_batch_users] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
 echo "[DLG_EEGNet_batch_users] selection=${SELECTION} | split=${SPLIT} eval_session=${EVAL_SESSION:-all} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE}"
 echo "[DLG_EEGNet_batch_users] iters=${ITERS} log_every=${LOG_EVERY} max_trials=${MAX_TRIALS} start_offset=${START_OFFSET} out_dir=${OUT_DIR}"
+echo "[DLG_EEGNet_batch_users] trial_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
 echo "================================================================================"
 
 exec "$PYTHON" -u -m scripts.dlg_batch_users \

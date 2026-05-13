@@ -125,6 +125,12 @@ def flatten_result(summary: Dict, elapsed_sec: float) -> Dict:
         "label_correct": label_correct,
         "mse": float(summary["final_reconstruction"]["mse"]),
         "corr": float(summary["final_reconstruction"]["corr"]),
+        "mse_to_clean": summary["final_reconstruction"].get("mse_to_clean"),
+        "corr_to_clean": summary["final_reconstruction"].get("corr_to_clean"),
+        "trial_laplace_epsilon": float(summary["trial_laplace"]["epsilon"]),
+        "trial_laplace_scale": float(summary["trial_laplace"]["scale"]),
+        "trial_laplace_target_mse_to_clean": float(summary["trial_laplace"]["target_mse_to_clean"]),
+        "trial_laplace_target_corr_to_clean": float(summary["trial_laplace"]["target_corr_to_clean"]),
         "final_grad_loss": float(summary["history"][-1]["grad_loss"]) if summary["history"] else None,
         "recon_user_top1_acc": float(recon_metrics["user_top1_acc"]),
         f"recon_user_top{topk}_acc": float(recon_metrics[topk_key]),
@@ -154,6 +160,12 @@ def format_csv(rows: List[Dict], topk: int) -> str:
         "label_correct",
         "mse",
         "corr",
+        "mse_to_clean",
+        "corr_to_clean",
+        "trial_laplace_epsilon",
+        "trial_laplace_scale",
+        "trial_laplace_target_mse_to_clean",
+        "trial_laplace_target_corr_to_clean",
         "final_grad_loss",
         "recon_user_top1_acc",
         f"recon_user_top{topk}_acc",
@@ -207,6 +219,7 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
         f"eval_session     : internal={args.eval_session_internal}, original={args.eval_session_original}",
         f"attack_head      : {args.attack_head}",
         f"label_mode       : {args.label_mode}",
+        f"trial_laplace    : epsilon={args.trial_laplace_epsilon}, sensitivity={args.trial_laplace_sensitivity}",
         f"iters/log_every  : {args.iters}/{args.log_every}",
         f"n_selected       : {len(selected_indices)}",
         f"selected_range   : {min(selected_indices)}..{max(selected_indices)}" if selected_indices else "selected_range   : n/a",
@@ -220,6 +233,8 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
         f"std MSE                 : {std(rows, 'mse'):.4f}",
         f"mean Corr               : {mean(rows, 'corr'):.4f}",
         f"median Corr             : {median(rows, 'corr'):.4f}",
+        f"mean MSE to clean       : {mean(rows, 'mse_to_clean'):.4f}",
+        f"mean Corr to clean      : {mean(rows, 'corr_to_clean'):.4f}",
         f"iDLG label acc          : {format_pct(label_acc)}",
         f"Recon User Top-1        : {format_pct(mean(rows, 'recon_user_top1_acc'))}",
         f"Recon User Top-{topk}        : {format_pct(mean(rows, topk_key))}",
@@ -259,29 +274,42 @@ def plot_waveform_grid(rows: List[Dict], out_dir: Path, plot_channel: int, sfreq
     cols = min(4, len(rows))
     rows_n = math.ceil(len(rows) / cols)
     fig, axes = plt.subplots(rows_n, cols, figsize=(4.8 * cols, 3.0 * rows_n), squeeze=False)
+    panel_dir = out_dir / "batch_waveform_panels"
+    panel_dir.mkdir(parents=True, exist_ok=True)
 
     for ax, row in zip(axes.flat, rows):
         recon_path = out_dir / f"user_{row['user']:02d}_trial_{row['trial_index']}" / "reconstruction.pt"
+        if not recon_path.exists():
+            recon_path = out_dir / f"trial_{row['trial_index']}_user_{row['user']:02d}" / "reconstruction.pt"
         payload = torch.load(recon_path, map_location="cpu")
         real_x = payload["real_x"][0]
         recon_x = payload["recon_x"][0]
         channel = choose_channel(real_x, plot_channel)
         time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
 
-        ax.plot(time_ms, real_x[channel].numpy(), label="target", linewidth=1.5, color="#111111")
-        ax.plot(time_ms, recon_x[channel].numpy(), label="recon", linewidth=1.1, color="#d95f02", alpha=0.9)
-        ax.set_title(f"user {row['user']} | ch {channel} | corr {row['corr']:.4f}")
+        target = real_x[channel].numpy()
+        recon = recon_x[channel].numpy()
+        ax.plot(time_ms, target, linewidth=1.5, color="#111111")
+        ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9)
         ax.set_xlabel("Time (ms)")
         ax.set_ylabel("Amplitude (a.u.)")
         ax.grid(alpha=0.22)
 
+        panel_path = panel_dir / f"trial_{row['trial_index']}_user_{row['user']:02d}.png"
+        panel_fig, panel_ax = plt.subplots(figsize=(4.8, 3.0))
+        panel_ax.plot(time_ms, target, linewidth=1.5, color="#111111")
+        panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9)
+        panel_ax.set_xlabel("Time (ms)")
+        panel_ax.set_ylabel("Amplitude (a.u.)")
+        panel_ax.grid(alpha=0.22)
+        panel_fig.tight_layout()
+        panel_fig.savefig(panel_path, dpi=180)
+        plt.close(panel_fig)
+
     for ax in axes.flat[len(rows):]:
         ax.axis("off")
 
-    handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.suptitle("Per-user EEG reconstruction waveform", y=0.985)
-    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.945))
-    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    fig.tight_layout()
     path = out_dir / "batch_waveform_grid.png"
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -394,6 +422,8 @@ def main() -> None:
     parser.add_argument("--optimizer", type=str, default="lbfgs", choices=["lbfgs", "adam"])
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument("--trial_laplace_epsilon", type=float, default=0.0)
+    parser.add_argument("--trial_laplace_sensitivity", type=float, default=1.0)
     parser.add_argument("--user_hidden_dim", type=int, default=256)
     parser.add_argument("--user_dropout", type=float, default=0.5)
     parser.add_argument("--plot_channel", type=int, default=-1)
