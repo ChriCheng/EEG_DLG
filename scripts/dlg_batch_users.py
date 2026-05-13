@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import random
@@ -13,7 +14,12 @@ import matplotlib
 import numpy as np
 import torch
 
-from scripts.dlg_attack import run_dlg, save_text
+from scripts.dlg_attack import (
+    filter_indices_by_session,
+    resolve_eval_session_internal,
+    run_dlg,
+    save_text,
+)
 from scripts.train import build_dataset, build_loso_split
 
 matplotlib.use("Agg")
@@ -34,11 +40,22 @@ def mean(rows: List[Dict], key: str) -> float:
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def std(rows: List[Dict], key: str) -> float:
+    vals = [row[key] for row in rows if row.get(key) is not None]
+    return float(np.std(vals)) if vals else float("nan")
+
+
+def median(rows: List[Dict], key: str) -> float:
+    vals = [row[key] for row in rows if row.get(key) is not None]
+    return float(np.median(vals)) if vals else float("nan")
+
+
 def select_one_trial_per_user(
     ds,
     split: str,
     train_session_internal: int | None,
     seed: int,
+    eval_session_internal: int | None = None,
 ) -> List[int]:
     if split == "all":
         pool = list(range(len(ds)))
@@ -47,6 +64,8 @@ def select_one_trial_per_user(
             raise ValueError("--train_session_internal is required when --split is train or test")
         train_idx, test_idx = build_loso_split(ds, train_session_internal)
         pool = train_idx if split == "train" else test_idx
+
+    pool = filter_indices_by_session(ds, pool, eval_session_internal, split)
 
     by_user: Dict[int, List[int]] = {u: [] for u in range(ds.n_users)}
     for idx in pool:
@@ -63,6 +82,22 @@ def select_one_trial_per_user(
     return selected
 
 
+def select_all_trials(
+    ds,
+    split: str,
+    train_session_internal: int | None,
+    eval_session_internal: int | None = None,
+) -> List[int]:
+    if split == "all":
+        pool = list(range(len(ds)))
+    else:
+        if train_session_internal is None:
+            raise ValueError("--train_session_internal is required when --split is train or test")
+        train_idx, test_idx = build_loso_split(ds, train_session_internal)
+        pool = train_idx if split == "train" else test_idx
+    return filter_indices_by_session(ds, pool, eval_session_internal, split)
+
+
 def flatten_result(summary: Dict, elapsed_sec: float) -> Dict:
     topk = summary["topk"]
     topk_key = f"user_top{topk}_acc"
@@ -75,9 +110,15 @@ def flatten_result(summary: Dict, elapsed_sec: float) -> Dict:
     inferred = None if inferred is None else int(inferred)
     label_correct = None if inferred is None else int(inferred == attack_label)
     recon_detail = summary["identity_details"]["recon"][0]
+    session_internal = int(summary["y_session"][0])
+    session_original = summary["eval_session_original"]
+    if session_original is None:
+        session_original = summary["session_original_values"][session_internal]
     return {
         "user": int(summary["y_user"][0]),
         "trial_index": int(summary["batch_indices"][0]),
+        "session_internal": session_internal,
+        "session_original": session_original,
         "task_label": int(summary["y_task"][0]),
         "attack_label": attack_label,
         "inferred_label": inferred,
@@ -105,6 +146,8 @@ def format_csv(rows: List[Dict], topk: int) -> str:
     fields = [
         "user",
         "trial_index",
+        "session_internal",
+        "session_original",
         "task_label",
         "attack_label",
         "inferred_label",
@@ -148,6 +191,10 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
     topk_key = f"recon_user_top{topk}_acc"
     label_rows = [row for row in rows if row["label_correct"] is not None]
     label_acc = mean(label_rows, "label_correct") if label_rows else float("nan")
+    per_user_counts = {
+        user: sum(1 for row in rows if row["user"] == user)
+        for user in sorted({row["user"] for row in rows})
+    }
     lines = [
         "DLG EEG Batch User Summary",
         "=" * 80,
@@ -155,17 +202,24 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
         f"dataset          : {args.dataset}",
         f"model            : {args.model}",
         f"split            : {args.split}",
+        f"selection        : {args.selection}",
         f"train_session    : {args.train_session_internal}",
+        f"eval_session     : internal={args.eval_session_internal}, original={args.eval_session_original}",
         f"attack_head      : {args.attack_head}",
         f"label_mode       : {args.label_mode}",
         f"iters/log_every  : {args.iters}/{args.log_every}",
-        f"selected_indices : {selected_indices}",
+        f"n_selected       : {len(selected_indices)}",
+        f"selected_range   : {min(selected_indices)}..{max(selected_indices)}" if selected_indices else "selected_range   : n/a",
         "",
         "Aggregate",
         "-" * 80,
-        f"n_users                 : {len(rows)}",
+        f"n_trials                : {len(rows)}",
+        f"n_users                 : {len(per_user_counts)}",
+        f"trials/user             : {per_user_counts}",
         f"mean MSE                : {mean(rows, 'mse'):.4f}",
+        f"std MSE                 : {std(rows, 'mse'):.4f}",
         f"mean Corr               : {mean(rows, 'corr'):.4f}",
+        f"median Corr             : {median(rows, 'corr'):.4f}",
         f"iDLG label acc          : {format_pct(label_acc)}",
         f"Recon User Top-1        : {format_pct(mean(rows, 'recon_user_top1_acc'))}",
         f"Recon User Top-{topk}        : {format_pct(mean(rows, topk_key))}",
@@ -177,12 +231,12 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
         "",
         "Per User",
         "-" * 80,
-        f"{'user':>4} {'trial':>8} {'task':>4} {'label':>7} {'mse':>8} {'corr':>8} {'Top1':>7} {('Top' + str(topk)):>7} {'conf':>8} topk_users",
+        f"{'user':>4} {'trial':>8} {'sess':>6} {'task':>4} {'label':>7} {'mse':>8} {'corr':>8} {'Top1':>7} {('Top' + str(topk)):>7} {'conf':>8} topk_users",
     ]
     for row in rows:
         topk_users = "|".join(str(v) for v in row["recon_topk_users"])
         lines.append(
-            f"{row['user']:>4} {row['trial_index']:>8} {row['task_label']:>4} "
+            f"{row['user']:>4} {row['trial_index']:>8} {str(row['session_original']):>6} {row['task_label']:>4} "
             f"{str(row['label_correct']):>7} {row['mse']:>8.4f} {row['corr']:>8.4f} "
             f"{format_pct(row['recon_user_top1_acc']):>7} "
             f"{format_pct(row[topk_key]):>7} "
@@ -319,7 +373,20 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"])
+    parser.add_argument("--selection", type=str, default="one_per_user", choices=["one_per_user", "all"])
     parser.add_argument("--train_session_internal", type=int, default=None)
+    parser.add_argument(
+        "--eval_session_internal",
+        type=int,
+        default=None,
+        help="Optionally restrict DLG sample selection to one internal session id.",
+    )
+    parser.add_argument(
+        "--eval_session_original",
+        type=int,
+        default=None,
+        help="Optionally restrict DLG sample selection to one original session label.",
+    )
     parser.add_argument("--attack_head", type=str, default="task", choices=["task", "user"])
     parser.add_argument("--label_mode", type=str, default="idlg", choices=["idlg", "true", "dlg"])
     parser.add_argument("--iters", type=int, default=10)
@@ -331,6 +398,10 @@ def main() -> None:
     parser.add_argument("--user_dropout", type=float, default=0.5)
     parser.add_argument("--plot_channel", type=int, default=-1)
     parser.add_argument("--sfreq", type=float, default=128.0)
+    parser.add_argument("--skip_figures", action="store_true")
+    parser.add_argument("--keep_trial_artifacts", action="store_true")
+    parser.add_argument("--max_trials", type=int, default=0, help="Limit the number of selected trials; 0 means all.")
+    parser.add_argument("--start_offset", type=int, default=0, help="Skip this many selected trials before running.")
     parser.add_argument("--out_dir", type=str, default="checkpoint/dlg_attack_batch")
     args = parser.parse_args()
 
@@ -345,51 +416,89 @@ def main() -> None:
         ckpt = torch.load(args.checkpoint, map_location="cpu")
         train_session_internal = ckpt.get("extra", {}).get("train_session_internal")
         args.train_session_internal = train_session_internal
-
-    selected_indices = select_one_trial_per_user(
-        ds=ds,
-        split=args.split,
-        train_session_internal=train_session_internal,
-        seed=args.seed,
+    eval_session_internal = resolve_eval_session_internal(
+        ds,
+        args.eval_session_internal,
+        args.eval_session_original,
     )
+    args.eval_session_internal = eval_session_internal
+    args.eval_session_original = (
+        None if eval_session_internal is None else ds.session_original_values[eval_session_internal]
+    )
+    run_dlg_eval_session_original = args.eval_session_original
+
+    if args.selection == "one_per_user":
+        selected_indices = select_one_trial_per_user(
+            ds=ds,
+            split=args.split,
+            train_session_internal=train_session_internal,
+            seed=args.seed,
+            eval_session_internal=eval_session_internal,
+        )
+    else:
+        selected_indices = select_all_trials(
+            ds=ds,
+            split=args.split,
+            train_session_internal=train_session_internal,
+            eval_session_internal=eval_session_internal,
+        )
+    if args.start_offset < 0:
+        raise ValueError("--start_offset must be >= 0")
+    if args.max_trials < 0:
+        raise ValueError("--max_trials must be >= 0")
+    if args.start_offset:
+        selected_indices = selected_indices[args.start_offset:]
+    if args.max_trials:
+        selected_indices = selected_indices[:args.max_trials]
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    summaries = []
-    for user, trial_idx in enumerate(selected_indices):
-        user_out_dir = out_dir / f"user_{user:02d}_trial_{trial_idx}"
+    for i, trial_idx in enumerate(selected_indices, start=1):
+        true_user = int(ds.y_user[trial_idx].item())
+        user_out_dir = out_dir / f"trial_{trial_idx}_user_{true_user:02d}"
         attack_args = SimpleNamespace(**vars(args))
         attack_args.indices = str(trial_idx)
         attack_args.batch_size = 1
         attack_args.out_dir = str(user_out_dir)
+        attack_args.eval_session_original = None
+        attack_args.no_visualizations = args.skip_figures
+        attack_args.save_artifacts = args.keep_trial_artifacts or not args.skip_figures
         print("\n" + "=" * 80)
-        print(f"[Batch DLG] user={user} trial_index={trial_idx} out={user_out_dir}")
+        print(
+            f"[Batch DLG] {i}/{len(selected_indices)} "
+            f"user={true_user} trial_index={trial_idx} out={user_out_dir}"
+        )
         print("=" * 80)
         start = time.time()
         summary = run_dlg(attack_args)
         elapsed = time.time() - start
         row = flatten_result(summary, elapsed_sec=elapsed)
         rows.append(row)
-        summaries.append(summary)
+        del summary
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     batch_summary = {
         "args": vars(args),
+        "eval_session_original": run_dlg_eval_session_original,
         "selected_indices": selected_indices,
         "rows": rows,
-        "summaries": summaries,
     }
     save_json(batch_summary, out_dir / "batch_summary.json")
     save_text(format_csv(rows, args.topk), out_dir / "batch_metrics.csv")
     save_text(format_report(rows, args, selected_indices), out_dir / "batch_summary.txt")
-    figure_paths = {
-        "waveform_grid": plot_waveform_grid(rows, out_dir, args.plot_channel, args.sfreq),
-        "quality_bars": plot_quality_bars(rows, out_dir),
-        "identity_leakage_bars": plot_leakage_bars(rows, out_dir, args.topk),
-    }
-    batch_summary["figures"] = figure_paths
-    save_json(batch_summary, out_dir / "batch_summary.json")
+    figure_paths = {}
+    if not args.skip_figures:
+        figure_paths = {
+            "waveform_grid": plot_waveform_grid(rows, out_dir, args.plot_channel, args.sfreq),
+            "quality_bars": plot_quality_bars(rows, out_dir),
+            "identity_leakage_bars": plot_leakage_bars(rows, out_dir, args.topk),
+        }
+        batch_summary["figures"] = figure_paths
+        save_json(batch_summary, out_dir / "batch_summary.json")
     print("\nSaved:")
     print(f"  - {out_dir / 'batch_summary.json'}")
     print(f"  - {out_dir / 'batch_metrics.csv'}")

@@ -204,7 +204,49 @@ def task_accuracy(model: nn.Module, x: torch.Tensor, y_task: torch.Tensor) -> fl
     return float((pred == y_task).float().mean().item())
 
 
-def select_indices(ds, split: str, train_session_internal: int | None, batch_size: int, seed: int) -> List[int]:
+def resolve_eval_session_internal(
+    ds,
+    eval_session_internal: int | None,
+    eval_session_original: int | None,
+) -> int | None:
+    if eval_session_internal is not None and eval_session_original is not None:
+        raise ValueError("Use only one of --eval_session_internal or --eval_session_original")
+    if eval_session_original is None:
+        return eval_session_internal
+    if eval_session_original not in ds.session_map:
+        raise ValueError(
+            f"eval_session_original={eval_session_original} is not in dataset sessions "
+            f"{ds.session_original_values}"
+        )
+    return int(ds.session_map[eval_session_original])
+
+
+def filter_indices_by_session(ds, indices: List[int], session_internal: int | None, split: str) -> List[int]:
+    if session_internal is None:
+        return indices
+    if session_internal < 0 or session_internal >= ds.n_sessions:
+        raise ValueError(
+            f"eval_session_internal={session_internal} is out of range for n_sessions={ds.n_sessions}"
+        )
+    filtered = [idx for idx in indices if int(ds.y_session[idx].item()) == session_internal]
+    if not filtered:
+        session_original = ds.session_original_values[session_internal]
+        raise ValueError(
+            f"No samples left after filtering split={split!r} to "
+            f"eval_session_internal={session_internal} "
+            f"(original={session_original})"
+        )
+    return filtered
+
+
+def select_indices(
+    ds,
+    split: str,
+    train_session_internal: int | None,
+    batch_size: int,
+    seed: int,
+    eval_session_internal: int | None = None,
+) -> List[int]:
     if split == "all":
         pool = list(range(len(ds)))
     else:
@@ -212,6 +254,8 @@ def select_indices(ds, split: str, train_session_internal: int | None, batch_siz
             raise ValueError("--train_session_internal is required when --split is train or test")
         train_idx, test_idx = build_loso_split(ds, train_session_internal)
         pool = train_idx if split == "train" else test_idx
+
+    pool = filter_indices_by_session(ds, pool, eval_session_internal, split)
 
     if batch_size > len(pool):
         raise ValueError(f"batch_size={batch_size} is larger than selected pool size={len(pool)}")
@@ -369,10 +413,22 @@ def run_dlg(args: argparse.Namespace) -> Dict:
     train_session_internal = args.train_session_internal
     if train_session_internal is None:
         train_session_internal = ckpt_extra.get("train_session_internal")
+    eval_session_internal = resolve_eval_session_internal(
+        ds,
+        args.eval_session_internal,
+        args.eval_session_original,
+    )
 
     indices = args.indices
     if indices:
         batch_indices = [int(v.strip()) for v in indices.split(",") if v.strip()]
+        if eval_session_internal is not None:
+            filtered_indices = filter_indices_by_session(ds, batch_indices, eval_session_internal, args.split)
+            if len(filtered_indices) != len(batch_indices):
+                raise ValueError(
+                    "--indices contains samples outside the requested eval session "
+                    f"{eval_session_internal}"
+                )
     else:
         batch_indices = select_indices(
             ds,
@@ -380,12 +436,14 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             train_session_internal=train_session_internal,
             batch_size=args.batch_size,
             seed=args.seed,
+            eval_session_internal=eval_session_internal,
         )
 
     batch = [ds[i] for i in batch_indices]
     x = torch.stack([item[0] for item in batch], dim=0).to(device)
     y_task = torch.stack([item[1] for item in batch], dim=0).to(device)
     y_user = torch.stack([item[2] for item in batch], dim=0).to(device)
+    y_session = torch.stack([item[3] for item in batch], dim=0).to(device)
     attack_labels = y_task if args.attack_head == "task" else y_user
 
     model.zero_grad(set_to_none=True)
@@ -427,10 +485,15 @@ def run_dlg(args: argparse.Namespace) -> Dict:
     else:
         optimizer = torch.optim.Adam(opt_params, lr=args.lr)
 
+    no_visualizations = getattr(args, "no_visualizations", False)
+    save_artifacts = getattr(args, "save_artifacts", True)
     history = []
-    snapshots = [{"label": "iter 0", "tensor": dummy_x.detach()[0].cpu().clone()}]
+    snapshots = []
+    if not no_visualizations:
+        snapshots.append({"label": "iter 0", "tensor": dummy_x.detach()[0].cpu().clone()})
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if save_artifacts or not no_visualizations:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     for it in range(1, args.iters + 1):
         def closure() -> torch.Tensor:
@@ -464,12 +527,13 @@ def run_dlg(args: argparse.Namespace) -> Dict:
                         "corr": float(corr),
                     }
                 )
-                snapshots.append(
-                    {
-                        "label": f"iter {it}",
-                        "tensor": dummy_x.detach()[0].cpu().clone(),
-                    }
-                )
+                if not no_visualizations:
+                    snapshots.append(
+                        {
+                            "label": f"iter {it}",
+                            "tensor": dummy_x.detach()[0].cpu().clone(),
+                        }
+                    )
                 print(
                     f"[DLG] iter={it:04d} grad_loss={grad_loss.item():.6f} "
                     f"mse={mse:.6f} corr={corr:.4f}"
@@ -505,11 +569,17 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         "attack_head": args.attack_head,
         "batch_indices": batch_indices,
         "train_session_internal": train_session_internal,
+        "eval_session_internal": eval_session_internal,
+        "eval_session_original": None
+        if eval_session_internal is None
+        else ds.session_original_values[eval_session_internal],
+        "session_original_values": ds.session_original_values,
         "split": args.split,
         "topk": topk,
         "random_topk_baseline": float(topk / ds.n_users),
         "y_task": y_task.detach().cpu().tolist(),
         "y_user": y_user.detach().cpu().tolist(),
+        "y_session": y_session.detach().cpu().tolist(),
         "label_info": label_info,
         "final_reconstruction": {
             "mse": float(F.mse_loss(recon, x).item()),
@@ -525,39 +595,46 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         "noise": identity_details(model, noise, y_user, topk),
     }
     summary["identity_details"] = detail_rows
-    waveform_path = out_dir / "eeg_waveform_trajectory.png"
-    plot_channel = save_waveform_trajectory(
-        real_x=x.detach()[0].cpu(),
-        snapshots=snapshots,
-        path=waveform_path,
-        plot_channel=args.plot_channel,
-        sfreq=args.sfreq,
-    )
-    summary["visualization"] = {
-        "plot_channel": plot_channel,
-        "waveform_trajectory_png": str(waveform_path),
-    }
-    save_json(summary, out_dir / "summary.json")
-    save_text(format_summary_text(summary), out_dir / "summary.txt")
-    save_text(format_topk_csv(summary), out_dir / "topk_predictions.csv")
-    torch.save(
-        {
-            "real_x": x.detach().cpu(),
-            "recon_x": recon.detach().cpu(),
-            "noise_x": noise.detach().cpu(),
-            "y_task": y_task.detach().cpu(),
-            "y_user": y_user.detach().cpu(),
-            "batch_indices": batch_indices,
-            "history": history,
-            "snapshots": snapshots,
-        },
-        out_dir / "reconstruction.pt",
-    )
-    print(f"Saved {out_dir / 'summary.json'}")
-    print(f"Saved {out_dir / 'summary.txt'}")
-    print(f"Saved {out_dir / 'topk_predictions.csv'}")
-    print(f"Saved {out_dir / 'reconstruction.pt'}")
-    print(f"Saved {waveform_path}")
+    if not no_visualizations:
+        waveform_path = out_dir / "eeg_waveform_trajectory.png"
+        plot_channel = save_waveform_trajectory(
+            real_x=x.detach()[0].cpu(),
+            snapshots=snapshots,
+            path=waveform_path,
+            plot_channel=args.plot_channel,
+            sfreq=args.sfreq,
+        )
+        summary["visualization"] = {
+            "plot_channel": plot_channel,
+            "waveform_trajectory_png": str(waveform_path),
+        }
+    else:
+        summary["visualization"] = None
+
+    if save_artifacts:
+        save_json(summary, out_dir / "summary.json")
+        save_text(format_summary_text(summary), out_dir / "summary.txt")
+        save_text(format_topk_csv(summary), out_dir / "topk_predictions.csv")
+        torch.save(
+            {
+                "real_x": x.detach().cpu(),
+                "recon_x": recon.detach().cpu(),
+                "noise_x": noise.detach().cpu(),
+                "y_task": y_task.detach().cpu(),
+                "y_user": y_user.detach().cpu(),
+                "y_session": y_session.detach().cpu(),
+                "batch_indices": batch_indices,
+                "history": history,
+                "snapshots": snapshots,
+            },
+            out_dir / "reconstruction.pt",
+        )
+        print(f"Saved {out_dir / 'summary.json'}")
+        print(f"Saved {out_dir / 'summary.txt'}")
+        print(f"Saved {out_dir / 'topk_predictions.csv'}")
+        print(f"Saved {out_dir / 'reconstruction.pt'}")
+        if summary["visualization"] is not None:
+            print(f"Saved {summary['visualization']['waveform_trajectory_png']}")
     return summary
 
 
@@ -573,6 +650,18 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"])
     parser.add_argument("--train_session_internal", type=int, default=None)
+    parser.add_argument(
+        "--eval_session_internal",
+        type=int,
+        default=None,
+        help="Optionally restrict DLG sample selection to one internal session id.",
+    )
+    parser.add_argument(
+        "--eval_session_original",
+        type=int,
+        default=None,
+        help="Optionally restrict DLG sample selection to one original session label.",
+    )
     parser.add_argument("--indices", type=str, default="")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--attack_head", type=str, default="task", choices=["task", "user"])
@@ -592,7 +681,10 @@ def main() -> None:
     )
     parser.add_argument("--sfreq", type=float, default=128.0, help="Sampling rate used for waveform x-axis in ms.")
     parser.add_argument("--out_dir", type=str, default="checkpoint/dlg_attack")
+    parser.add_argument("--no_visualizations", action="store_true")
+    parser.add_argument("--no_artifacts", action="store_true")
     args = parser.parse_args()
+    args.save_artifacts = not args.no_artifacts
     run_dlg(args)
 
 

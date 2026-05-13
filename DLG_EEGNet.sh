@@ -16,6 +16,7 @@ CHECKPOINT=${CHECKPOINT:-checkpoint/checkpoints_2stage_EEGNet/p300_eegnet_channe
 
 BATCH_SIZE=${BATCH_SIZE:-1}
 SPLIT=${SPLIT:-train}
+EVAL_SESSION=${EVAL_SESSION:-}
 ATTACK_HEAD=${ATTACK_HEAD:-task}
 LABEL_MODE=${LABEL_MODE:-idlg}
 ITERS=${ITERS:-33}
@@ -34,11 +35,14 @@ EXTRA_ARGS=()
 if [[ "$EUCLIDEAN_ALIGN" == "1" || "$EUCLIDEAN_ALIGN" == "true" ]]; then
   EXTRA_ARGS+=(--euclidean_align)
 fi
+if [[ -n "$EVAL_SESSION" ]]; then
+  EXTRA_ARGS+=(--eval_session_original "$EVAL_SESSION")
+fi
 
 echo
 echo "================================================================================"
 echo "[DLG_EEGNet] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
-echo "[DLG_EEGNet] attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
+echo "[DLG_EEGNet] split=${SPLIT} eval_session=${EVAL_SESSION:-all} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
 echo "[DLG_EEGNet] out_dir=${OUT_DIR}"
 echo "================================================================================"
 

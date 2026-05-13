@@ -286,6 +286,61 @@ def build_loso_split(ds: Dataset, train_session_internal: int) -> Tuple[List[int
     return train_idx, test_idx
 
 
+def resolve_session_internal(
+    ds: Dataset,
+    session_internal: int | None,
+    session_original: int | None,
+    *,
+    arg_name: str,
+) -> int | None:
+    if session_internal is not None and session_original is not None:
+        raise ValueError(f"Use only one of --{arg_name}_internal or --{arg_name}_original")
+    if session_original is None:
+        return session_internal
+    if session_original not in ds.session_map:
+        raise ValueError(
+            f"{arg_name}_original={session_original} is not in dataset sessions "
+            f"{ds.session_original_values}"
+        )
+    return int(ds.session_map[session_original])
+
+
+def build_leave_one_for_dlg_split(
+    ds: Dataset,
+    train_session_internal: int,
+    holdout_session_internal: int | None,
+) -> Tuple[List[int], List[int], List[int]]:
+    if holdout_session_internal is None:
+        train_idx, test_idx = build_loso_split(ds, train_session_internal)
+        return train_idx, test_idx, []
+    if train_session_internal == holdout_session_internal:
+        raise ValueError("train_session_internal and holdout_session_internal must be different")
+
+    all_sessions = ds.y_session.numpy()
+    train_idx = np.where(all_sessions == train_session_internal)[0].tolist()
+    test_idx = np.where(
+        (all_sessions != train_session_internal) & (all_sessions != holdout_session_internal)
+    )[0].tolist()
+    holdout_idx = np.where(all_sessions == holdout_session_internal)[0].tolist()
+
+    if len(train_idx) == 0:
+        raise ValueError(f"No samples for train_session_internal={train_session_internal}")
+    if len(test_idx) == 0:
+        raise ValueError(
+            "No samples left for the two-session test/user-head split after excluding "
+            f"train_session_internal={train_session_internal} and "
+            f"holdout_session_internal={holdout_session_internal}"
+        )
+    if len(holdout_idx) == 0:
+        raise ValueError(f"No samples for holdout_session_internal={holdout_session_internal}")
+    return train_idx, test_idx, holdout_idx
+
+
+def indices_for_session(ds: Dataset, session_internal: int) -> List[int]:
+    all_sessions = ds.y_session.numpy()
+    return np.where(all_sessions == session_internal)[0].tolist()
+
+
 def compute_accuracy(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
     if y_true.ndim != 1 or y_pred.ndim != 1:
         raise ValueError(f"y_true/y_pred must be 1-D, got {y_true.shape}, {y_pred.shape}")
@@ -677,7 +732,18 @@ def main():
         action="store_true",
         help="Use inverse-frequency sampling for Stage 1 task training. Useful for imbalanced P300.",
     )
-
+    parser.add_argument(
+        "--dlg_holdout_session_internal",
+        type=int,
+        default=None,
+        help="Internal session id held out from training/testing and reserved for large-batch DLG.",
+    )
+    parser.add_argument(
+        "--dlg_holdout_session_original",
+        type=int,
+        default=None,
+        help="Original session label held out from training/testing and reserved for large-batch DLG.",
+    )
     args = parser.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
@@ -699,6 +765,19 @@ def main():
     )
     model_cfg_for_run = build_model_config(ds, args.model)
     model_cfg_dict = asdict(model_cfg_for_run)
+    dlg_holdout_session_internal = resolve_session_internal(
+        ds,
+        args.dlg_holdout_session_internal,
+        args.dlg_holdout_session_original,
+        arg_name="dlg_holdout_session",
+    )
+    dlg_holdout_session_original = (
+        None
+        if dlg_holdout_session_internal is None
+        else ds.session_original_values[dlg_holdout_session_internal]
+    )
+    if dlg_holdout_session_internal is not None and ds.n_sessions < 3:
+        raise ValueError("DLG holdout mode requires at least 3 sessions")
     user_head_cfg = {
     "hidden_dim": args.user_hidden_dim,
     "dropout": args.user_dropout,
@@ -717,6 +796,7 @@ def main():
     print(f"user labels      : {torch.unique(ds.y_user).tolist()}")
     print(f"session labels   : {torch.unique(ds.y_session).tolist()}")
     print(f"session originals: {ds.session_original_values}")
+    print(f"DLG holdout      : internal={dlg_holdout_session_internal}, original={dlg_holdout_session_original}")
     print()
 
     # ---- save dir ----
@@ -744,6 +824,8 @@ def main():
         "normalize": args.normalize,
         "euclidean_align": args.euclidean_align,
         "task_balanced_sampler": args.task_balanced_sampler,
+        "dlg_holdout_session_internal": dlg_holdout_session_internal,
+        "dlg_holdout_session_original": dlg_holdout_session_original,
         "model_config": model_cfg_dict,
         "user_head_config": user_head_cfg,
 
@@ -774,9 +856,21 @@ def main():
         # LOSO over sessions
         # -------------------------------------------------
         for train_session_internal in range(ds.n_sessions):
+            if train_session_internal == dlg_holdout_session_internal:
+                continue
             train_session_original = ds.session_original_values[train_session_internal]
+            test_session_internal_values = [
+                s
+                for s in range(ds.n_sessions)
+                if s != train_session_internal and s != dlg_holdout_session_internal
+            ]
+            test_session_original_values = [
+                ds.session_original_values[s] for s in test_session_internal_values
+            ]
 
             fold_name = f"seed_{seed}_train_session_{train_session_original}"
+            if dlg_holdout_session_original is not None:
+                fold_name += f"_holdout_session_{dlg_holdout_session_original}"
             fold_dir = run_dir / fold_name
             fold_dir.mkdir(parents=True, exist_ok=True)
 
@@ -784,17 +878,27 @@ def main():
             print(
                 f"Fold: seed={seed}, "
                 f"train_session_internal={train_session_internal}, "
-                f"train_session_original={train_session_original}"
+                f"train_session_original={train_session_original}, "
+                f"test_session_originals={test_session_original_values}, "
+                f"dlg_holdout_session_original={dlg_holdout_session_original}"
             )
             print("-" * 80)
 
-            train_idx, test_idx = build_loso_split(ds, train_session_internal)
+            train_idx, test_idx, holdout_idx = build_leave_one_for_dlg_split(
+                ds,
+                train_session_internal=train_session_internal,
+                holdout_session_internal=dlg_holdout_session_internal,
+            )
 
             train_set = Subset(ds, train_idx)
             test_set = Subset(ds, test_idx)
+            user_train_idx = train_idx
+            user_test_idx = test_idx
+            user_train_set = Subset(ds, user_train_idx)
+            user_test_set = Subset(ds, user_test_idx)
 
             task_sampler = make_task_balanced_sampler(ds, train_idx) if args.task_balanced_sampler else None
-            user_sampler = make_user_balanced_sampler(ds, train_idx)
+            user_sampler = make_user_balanced_sampler(ds, user_train_idx)
             task_train_loader = DataLoader(
                 train_set,
                 batch_size=args.batch_size,
@@ -803,7 +907,7 @@ def main():
                 num_workers=args.num_workers,
             )
             user_train_loader = DataLoader(
-                train_set,
+                user_train_set,
                 batch_size=args.batch_size,
                 sampler=user_sampler,
                 num_workers=args.num_workers,
@@ -814,9 +918,18 @@ def main():
                 shuffle=False,
                 num_workers=args.num_workers,
             )
+            user_test_loader = DataLoader(
+                user_test_set,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+            )
 
-            print(f"train samples: {len(train_set)}")
-            print(f"test samples : {len(test_set)}")
+            print(f"task train samples       : {len(train_set)}")
+            print(f"task test samples        : {len(test_set)}")
+            print(f"user-head train samples  : {len(user_train_set)}")
+            print(f"user-head test samples   : {len(user_test_set)}")
+            print(f"DLG holdout samples      : {len(holdout_idx)}")
 
             # =====================================================
             # Stage 1: train task model
@@ -869,6 +982,10 @@ def main():
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
+                    "test_session_internal_values": test_session_internal_values,
+                    "test_session_original_values": test_session_original_values,
+                    "dlg_holdout_session_internal": dlg_holdout_session_internal,
+                    "dlg_holdout_session_original": dlg_holdout_session_original,
                     "stage": "task",
                     "epoch": epoch,
                     "train_task_loss": train_task_stats["loss"],
@@ -895,6 +1012,11 @@ def main():
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
+                    "test_session_internal_values": test_session_internal_values,
+                    "test_session_original_values": test_session_original_values,
+                    "dlg_holdout_session_internal": dlg_holdout_session_internal,
+                    "dlg_holdout_session_original": dlg_holdout_session_original,
+                    "session_original_values": ds.session_original_values,
                 }
 
                 save_checkpoint(
@@ -975,7 +1097,7 @@ def main():
 
                 test_user_stats = evaluate_user(
                     model=model,
-                    dataloader=test_loader,
+                    dataloader=user_test_loader,
                     device=device,
                 )
 
@@ -985,6 +1107,10 @@ def main():
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
+                    "test_session_internal_values": test_session_internal_values,
+                    "test_session_original_values": test_session_original_values,
+                    "dlg_holdout_session_internal": dlg_holdout_session_internal,
+                    "dlg_holdout_session_original": dlg_holdout_session_original,
                     "stage": "user",
                     "epoch": epoch,
                     "train_user_loss": train_user_stats["loss"],
@@ -1011,6 +1137,11 @@ def main():
                     "seed": seed,
                     "train_session_internal": train_session_internal,
                     "train_session_original": train_session_original,
+                    "test_session_internal_values": test_session_internal_values,
+                    "test_session_original_values": test_session_original_values,
+                    "dlg_holdout_session_internal": dlg_holdout_session_internal,
+                    "dlg_holdout_session_original": dlg_holdout_session_original,
+                    "session_original_values": ds.session_original_values,
                     "stage2_init": "scratch",
                 }
 
@@ -1065,6 +1196,10 @@ def main():
                 "seed": seed,
                 "train_session_internal": train_session_internal,
                 "train_session_original": train_session_original,
+                "test_session_internal_values": test_session_internal_values,
+                "test_session_original_values": test_session_original_values,
+                "dlg_holdout_session_internal": dlg_holdout_session_internal,
+                "dlg_holdout_session_original": dlg_holdout_session_original,
                 "best_task_epoch": best_task_epoch,
                 "best_user_epoch": best_user_epoch,
                 "test_mi_acc": best_task_row["test_mi_acc"],
@@ -1089,11 +1224,14 @@ def main():
     # Final summary
     # =====================================================
     def mean_metric(rows, key):
-        return float(np.mean([r[key] for r in rows]))
+        vals = [r[key] for r in rows if r.get(key) is not None]
+        return None if not vals else float(np.mean(vals))
 
     final_summary = {
         "dataset": args.dataset,
         "model": args.model,
+        "dlg_holdout_session_internal": dlg_holdout_session_internal,
+        "dlg_holdout_session_original": dlg_holdout_session_original,
         "num_total_runs": len(all_fold_results),
         "mean_test_mi_acc": mean_metric(all_fold_results, "test_mi_acc"),
         "mean_test_bca": mean_metric(all_fold_results, "test_bca"),
