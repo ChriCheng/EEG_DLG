@@ -447,6 +447,86 @@ def adjust_learning_rate(optimizer: torch.optim.Optimizer, base_lr: float, epoch
         param_group["lr"] = lr
 
 
+def add_laplace_noise_to_grads(
+    parameters,
+    *,
+    epsilon: float,
+    sensitivity: float,
+) -> Dict[str, float]:
+    stats = {
+        "enabled": bool(epsilon > 0),
+        "applied_to": "outgoing_gradients",
+        "epsilon": float(epsilon),
+        "sensitivity": float(sensitivity),
+        "scale": 0.0,
+        "noise_mean": 0.0,
+        "noise_std": 0.0,
+        "noise_rms": 0.0,
+        "grad_rms": 0.0,
+        "num_noisy_tensors": 0,
+        "num_noisy_elements": 0,
+    }
+    if epsilon <= 0:
+        return stats
+    if sensitivity <= 0:
+        raise ValueError("--gradient_laplace_sensitivity must be > 0 when gradient noise is enabled")
+
+    scale = sensitivity / epsilon
+    flat_noises = []
+    flat_grads = []
+    for p in parameters:
+        if p.grad is None:
+            continue
+        grad = p.grad
+        dist = torch.distributions.Laplace(
+            loc=torch.zeros((), device=grad.device, dtype=grad.dtype),
+            scale=torch.tensor(scale, device=grad.device, dtype=grad.dtype),
+        )
+        noise = dist.sample(grad.shape)
+        grad.add_(noise)
+        flat_noises.append(noise.detach().reshape(-1).cpu())
+        flat_grads.append((grad.detach() - noise.detach()).reshape(-1).cpu())
+
+    if flat_noises:
+        all_noise = torch.cat(flat_noises)
+        all_grads = torch.cat(flat_grads)
+        stats.update(
+            {
+                "scale": float(scale),
+                "noise_mean": float(all_noise.mean().item()),
+                "noise_std": float(all_noise.std(unbiased=False).item()),
+                "noise_rms": float(torch.sqrt(torch.mean(all_noise ** 2)).item()),
+                "grad_rms": float(torch.sqrt(torch.mean(all_grads ** 2)).item()),
+                "num_noisy_tensors": len(flat_noises),
+                "num_noisy_elements": int(all_noise.numel()),
+            }
+        )
+    return stats
+
+
+def mean_gradient_noise_stats(stats_rows: List[Dict[str, float]]) -> Dict[str, float]:
+    if not stats_rows:
+        return {}
+    keys = (
+        "noise_mean",
+        "noise_std",
+        "noise_rms",
+        "grad_rms",
+        "num_noisy_tensors",
+        "num_noisy_elements",
+    )
+    summary = {
+        "enabled": bool(stats_rows[0].get("enabled", False)),
+        "applied_to": stats_rows[0].get("applied_to", "outgoing_gradients"),
+        "epsilon": float(stats_rows[0].get("epsilon", 0.0)),
+        "sensitivity": float(stats_rows[0].get("sensitivity", 1.0)),
+        "scale": float(stats_rows[0].get("scale", 0.0)),
+    }
+    for key in keys:
+        summary[key] = float(np.mean([row.get(key, 0.0) for row in stats_rows]))
+    return summary
+
+
 # =========================
 # 3) Stage 1: train task model
 # =========================
@@ -550,6 +630,8 @@ def train_user_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    gradient_laplace_epsilon: float = 0.0,
+    gradient_laplace_sensitivity: float = 1.0,
 ) -> Dict[str, float]:
     model.backbone.train()
     model.task_head.eval()
@@ -561,6 +643,7 @@ def train_user_one_epoch(
     total_samples = 0
     all_true = []
     all_pred = []
+    gradient_noise_stats = []
 
     for x, _, y_user, _ in dataloader:
         x = x.to(device)
@@ -572,6 +655,13 @@ def train_user_one_epoch(
         loss = ce(user_logits, y_user)
 
         loss.backward()
+        gradient_noise_stats.append(
+            add_laplace_noise_to_grads(
+                (p for group in optimizer.param_groups for p in group["params"]),
+                epsilon=gradient_laplace_epsilon,
+                sensitivity=gradient_laplace_sensitivity,
+            )
+        )
         optimizer.step()
         apply_max_norm_constraints(model)
 
@@ -592,6 +682,7 @@ def train_user_one_epoch(
         "loss": total_loss / total_samples,
         "user_acc": user_acc,
         "uia": user_acc,
+        "gradient_laplace": mean_gradient_noise_stats(gradient_noise_stats),
     }
 
 
@@ -744,6 +835,18 @@ def main():
         default=None,
         help="Original session label held out from training/testing and reserved for large-batch DLG.",
     )
+    parser.add_argument(
+        "--gradient_laplace_epsilon",
+        type=float,
+        default=0.0,
+        help="If > 0, add Laplace noise to outgoing Stage-2 user-head gradients before optimizer.step().",
+    )
+    parser.add_argument(
+        "--gradient_laplace_sensitivity",
+        type=float,
+        default=1.0,
+        help="Sensitivity used for outgoing gradient Laplace noise scale = sensitivity / epsilon.",
+    )
     args = parser.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
@@ -797,6 +900,12 @@ def main():
     print(f"session labels   : {torch.unique(ds.y_session).tolist()}")
     print(f"session originals: {ds.session_original_values}")
     print(f"DLG holdout      : internal={dlg_holdout_session_internal}, original={dlg_holdout_session_original}")
+    print(
+        "gradient noise   : "
+        f"applied_to=outgoing_gradients, "
+        f"epsilon={args.gradient_laplace_epsilon}, "
+        f"sensitivity={args.gradient_laplace_sensitivity}"
+    )
     print()
 
     # ---- save dir ----
@@ -826,6 +935,12 @@ def main():
         "task_balanced_sampler": args.task_balanced_sampler,
         "dlg_holdout_session_internal": dlg_holdout_session_internal,
         "dlg_holdout_session_original": dlg_holdout_session_original,
+        "gradient_laplace": {
+            "enabled": bool(args.gradient_laplace_epsilon > 0),
+            "applied_to": "outgoing_gradients",
+            "epsilon": args.gradient_laplace_epsilon,
+            "sensitivity": args.gradient_laplace_sensitivity,
+        },
         "model_config": model_cfg_dict,
         "user_head_config": user_head_cfg,
 
@@ -1093,6 +1208,8 @@ def main():
                     dataloader=user_train_loader,
                     optimizer=user_optimizer,
                     device=device,
+                    gradient_laplace_epsilon=args.gradient_laplace_epsilon,
+                    gradient_laplace_sensitivity=args.gradient_laplace_sensitivity,
                 )
 
                 test_user_stats = evaluate_user(
@@ -1116,6 +1233,7 @@ def main():
                     "train_user_loss": train_user_stats["loss"],
                     "train_user_acc": train_user_stats["user_acc"],
                     "train_uia": train_user_stats["uia"],
+                    "gradient_laplace": train_user_stats["gradient_laplace"],
                     "test_user_loss": test_user_stats["loss"],
                     "test_user_acc": test_user_stats["user_acc"],
                     "test_uia": test_user_stats["uia"],
@@ -1143,6 +1261,12 @@ def main():
                     "dlg_holdout_session_original": dlg_holdout_session_original,
                     "session_original_values": ds.session_original_values,
                     "stage2_init": "scratch",
+                    "gradient_laplace": {
+                        "enabled": bool(args.gradient_laplace_epsilon > 0),
+                        "applied_to": "outgoing_gradients",
+                        "epsilon": args.gradient_laplace_epsilon,
+                        "sensitivity": args.gradient_laplace_sensitivity,
+                    },
                 }
 
                 save_checkpoint(
@@ -1200,6 +1324,12 @@ def main():
                 "test_session_original_values": test_session_original_values,
                 "dlg_holdout_session_internal": dlg_holdout_session_internal,
                 "dlg_holdout_session_original": dlg_holdout_session_original,
+                "gradient_laplace": {
+                    "enabled": bool(args.gradient_laplace_epsilon > 0),
+                    "applied_to": "outgoing_gradients",
+                    "epsilon": args.gradient_laplace_epsilon,
+                    "sensitivity": args.gradient_laplace_sensitivity,
+                },
                 "best_task_epoch": best_task_epoch,
                 "best_user_epoch": best_user_epoch,
                 "test_mi_acc": best_task_row["test_mi_acc"],
@@ -1232,6 +1362,12 @@ def main():
         "model": args.model,
         "dlg_holdout_session_internal": dlg_holdout_session_internal,
         "dlg_holdout_session_original": dlg_holdout_session_original,
+        "gradient_laplace": {
+            "enabled": bool(args.gradient_laplace_epsilon > 0),
+            "applied_to": "outgoing_gradients",
+            "epsilon": args.gradient_laplace_epsilon,
+            "sensitivity": args.gradient_laplace_sensitivity,
+        },
         "num_total_runs": len(all_fold_results),
         "mean_test_mi_acc": mean_metric(all_fold_results, "test_mi_acc"),
         "mean_test_bca": mean_metric(all_fold_results, "test_bca"),

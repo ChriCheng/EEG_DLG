@@ -80,7 +80,7 @@ echo "[DLG_EEGNet_batch_users] dataset=${DATASET} model=${MODEL} checkpoint=${CH
 echo "[DLG_EEGNet_batch_users] selection=${SELECTION} | split=${SPLIT} eval_session=${EVAL_SESSION:-all} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE}"
 echo "[DLG_EEGNet_batch_users] iters=${ITERS} log_every=${LOG_EVERY} max_trials=${MAX_TRIALS} start_offset=${START_OFFSET} out_dir=${OUT_DIR}"
 echo "[DLG_EEGNet_batch_users] plot_channel=${PLOT_CHANNEL} waveform_grid=${WAVEFORM_GRID} waveform_font_size=${WAVEFORM_FONT_SIZE}"
-echo "[DLG_EEGNet_batch_users] trial_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
+echo "[DLG_EEGNet_batch_users] gradient_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
 echo "================================================================================"
 
 exec "$PYTHON" -u -m scripts.dlg_batch_users \

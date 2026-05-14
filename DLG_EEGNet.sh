@@ -77,7 +77,7 @@ echo "==========================================================================
 echo "[DLG_EEGNet] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
 echo "[DLG_EEGNet] split=${SPLIT} eval_session=${EVAL_SESSION:-all} indices=${INDICES:-random} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
 echo "[DLG_EEGNet] plot_channel=${PLOT_CHANNEL} waveform_grid=${WAVEFORM_GRID} waveform_font_size=${WAVEFORM_FONT_SIZE}"
-echo "[DLG_EEGNet] trial_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
+echo "[DLG_EEGNet] gradient_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
 echo "[DLG_EEGNet] out_dir=${OUT_DIR}"
 echo "================================================================================"
 

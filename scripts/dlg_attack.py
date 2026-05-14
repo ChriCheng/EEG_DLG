@@ -146,22 +146,59 @@ def pearson_corr(x: torch.Tensor, y: torch.Tensor) -> float:
     return float(np.mean(vals))
 
 
-def add_trial_laplace_noise(
-    x: torch.Tensor,
+def add_gradient_laplace_noise(
+    named_params: List[Tuple[str, nn.Parameter]],
+    grads: List[torch.Tensor | None],
     epsilon: float,
     sensitivity: float,
-) -> Tuple[torch.Tensor, torch.Tensor, float]:
+) -> Tuple[List[torch.Tensor | None], List[Dict], Dict[str, float]]:
+    stats = {
+        "scale": 0.0,
+        "noise_mean": 0.0,
+        "noise_std": 0.0,
+        "noise_rms": 0.0,
+        "grad_rms": 0.0,
+        "num_noisy_tensors": 0,
+        "num_noisy_elements": 0,
+    }
     if epsilon <= 0:
-        return x, torch.zeros_like(x), 0.0
+        return grads, [], stats
     if sensitivity <= 0:
         raise ValueError("--trial_laplace_sensitivity must be > 0 when Laplace noise is enabled")
     scale = sensitivity / epsilon
-    dist = torch.distributions.Laplace(
-        loc=torch.zeros((), device=x.device, dtype=x.dtype),
-        scale=torch.tensor(scale, device=x.device, dtype=x.dtype),
-    )
-    noise = dist.sample(x.shape)
-    return x + noise, noise, float(scale)
+    noisy_grads: List[torch.Tensor | None] = []
+    noise_records = []
+    flat_noises = []
+    flat_grads = []
+    for (name, _), grad in zip(named_params, grads):
+        if grad is None:
+            noisy_grads.append(None)
+            continue
+        dist = torch.distributions.Laplace(
+            loc=torch.zeros((), device=grad.device, dtype=grad.dtype),
+            scale=torch.tensor(scale, device=grad.device, dtype=grad.dtype),
+        )
+        noise = dist.sample(grad.shape)
+        noisy_grads.append(grad + noise)
+        noise_records.append({"name": name, "noise": noise.detach().cpu()})
+        flat_noises.append(noise.detach().reshape(-1).cpu())
+        flat_grads.append(grad.detach().reshape(-1).cpu())
+
+    if flat_noises:
+        all_noise = torch.cat(flat_noises)
+        all_grads = torch.cat(flat_grads)
+        stats.update(
+            {
+                "scale": float(scale),
+                "noise_mean": float(all_noise.mean().item()),
+                "noise_std": float(all_noise.std(unbiased=False).item()),
+                "noise_rms": float(torch.sqrt(torch.mean(all_noise ** 2)).item()),
+                "grad_rms": float(torch.sqrt(torch.mean(all_grads ** 2)).item()),
+                "num_noisy_tensors": len(flat_noises),
+                "num_noisy_elements": int(all_noise.numel()),
+            }
+        )
+    return noisy_grads, noise_records, stats
 
 
 @torch.no_grad()
@@ -385,8 +422,23 @@ def choose_plot_channel(real_x: torch.Tensor, requested_channel: int) -> int:
     return int(torch.var(real_x, dim=1).argmax().item())
 
 
+def waveform_ylim(target: np.ndarray) -> Tuple[float, float]:
+    all_values = target.reshape(-1)
+    finite_values = all_values[np.isfinite(all_values)]
+    if finite_values.size == 0:
+        return -1.0, 1.0
+    y_min = float(finite_values.min())
+    y_max = float(finite_values.max())
+    if math.isclose(y_min, y_max):
+        pad = max(abs(y_min) * 0.05, 1e-3)
+    else:
+        pad = (y_max - y_min) * 0.08
+    return y_min - pad, y_max + pad
+
+
 def save_waveform_trajectory(
     real_x: torch.Tensor,
+    clean_x: torch.Tensor,
     snapshots: List[Dict],
     path: Path,
     plot_channel: int,
@@ -394,31 +446,36 @@ def save_waveform_trajectory(
     show_grid: bool,
     font_size: float,
 ) -> Tuple[int, List[str]]:
-    channel = choose_plot_channel(real_x, plot_channel)
+    channel = choose_plot_channel(clean_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
+    recon_series = [snapshot["tensor"][channel].detach().cpu().numpy() for snapshot in snapshots]
+    y_limits = waveform_ylim(target)
     time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
     cols = min(3, len(snapshots))
     rows = math.ceil(len(snapshots) / cols)
     fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 3.4 * rows), squeeze=False)
     panel_paths = []
-    for ax, snapshot in zip(axes.flat, snapshots):
-        recon = snapshot["tensor"][channel].detach().cpu().numpy()
-        ax.plot(time_ms, target, linewidth=1.7, color="#111111")
-        ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92)
+    for ax, snapshot, recon in zip(axes.flat, snapshots, recon_series):
+        ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
+        ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
+        ax.set_ylim(*y_limits)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
         ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
+        ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
         if show_grid:
             ax.grid(alpha=0.22)
 
         label = str(snapshot["label"]).replace(" ", "_").replace("/", "_")
         panel_path = path.with_name(f"{path.stem}_{label}{path.suffix}")
         panel_fig, panel_ax = plt.subplots(figsize=(5.2, 3.4))
-        panel_ax.plot(time_ms, target, linewidth=1.7, color="#111111")
-        panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92)
+        panel_ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
+        panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
+        panel_ax.set_ylim(*y_limits)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
         panel_ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
+        panel_ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
         if show_grid:
             panel_ax.grid(alpha=0.22)
         panel_fig.tight_layout()
@@ -504,11 +561,7 @@ def run_dlg(args: argparse.Namespace) -> Dict:
     attack_labels = y_task if args.attack_head == "task" else y_user
     trial_laplace_epsilon = float(getattr(args, "trial_laplace_epsilon", 0.0) or 0.0)
     trial_laplace_sensitivity = float(getattr(args, "trial_laplace_sensitivity", 1.0))
-    x, trial_laplace_noise, trial_laplace_scale = add_trial_laplace_noise(
-        clean_x,
-        epsilon=trial_laplace_epsilon,
-        sensitivity=trial_laplace_sensitivity,
-    )
+    x = clean_x
 
     model.zero_grad(set_to_none=True)
     named_params = named_trainable_parameters(model)
@@ -521,6 +574,12 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         named_params=named_params,
     )
     target_grads = [None if g is None else g.detach() for g in target_grads]
+    target_grads, gradient_laplace_noise, gradient_laplace_stats = add_gradient_laplace_noise(
+        named_params,
+        target_grads,
+        epsilon=trial_laplace_epsilon,
+        sensitivity=trial_laplace_sensitivity,
+    )
 
     if args.label_mode == "idlg":
         if x.shape[0] != 1:
@@ -646,11 +705,16 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         "y_session": y_session.detach().cpu().tolist(),
         "trial_laplace": {
             "enabled": bool(trial_laplace_epsilon > 0),
+            "applied_to": "gradients",
             "epsilon": trial_laplace_epsilon,
             "sensitivity": trial_laplace_sensitivity,
-            "scale": trial_laplace_scale,
-            "noise_mean": float(trial_laplace_noise.mean().item()),
-            "noise_std": float(trial_laplace_noise.std(unbiased=False).item()),
+            "scale": gradient_laplace_stats["scale"],
+            "noise_mean": gradient_laplace_stats["noise_mean"],
+            "noise_std": gradient_laplace_stats["noise_std"],
+            "noise_rms": gradient_laplace_stats["noise_rms"],
+            "grad_rms": gradient_laplace_stats["grad_rms"],
+            "num_noisy_tensors": gradient_laplace_stats["num_noisy_tensors"],
+            "num_noisy_elements": gradient_laplace_stats["num_noisy_elements"],
             "target_mse_to_clean": float(F.mse_loss(x, clean_x).item()),
             "target_corr_to_clean": pearson_corr(x, clean_x),
         },
@@ -679,6 +743,7 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         waveform_path = out_dir / "eeg_waveform_trajectory.png"
         plot_channel, panel_paths = save_waveform_trajectory(
             real_x=x.detach()[0].cpu(),
+            clean_x=clean_x.detach()[0].cpu(),
             snapshots=snapshots,
             path=waveform_path,
             plot_channel=args.plot_channel,
@@ -706,7 +771,7 @@ def run_dlg(args: argparse.Namespace) -> Dict:
                 "clean_x": clean_x.detach().cpu(),
                 "recon_x": recon.detach().cpu(),
                 "noise_x": noise.detach().cpu(),
-                "trial_laplace_noise": trial_laplace_noise.detach().cpu(),
+                "gradient_laplace_noise": gradient_laplace_noise,
                 "y_task": y_task.detach().cpu(),
                 "y_user": y_user.detach().cpu(),
                 "y_session": y_session.detach().cpu(),
@@ -762,7 +827,7 @@ def main() -> None:
         "--trial_laplace_epsilon",
         type=float,
         default=0.0,
-        help="If > 0, add Laplace noise to each selected trial before computing target gradients.",
+        help="If > 0, add Laplace noise to the locally computed gradients before DLG matching.",
     )
     parser.add_argument(
         "--trial_laplace_sensitivity",

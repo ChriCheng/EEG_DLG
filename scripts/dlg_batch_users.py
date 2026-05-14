@@ -19,6 +19,7 @@ from scripts.dlg_attack import (
     resolve_eval_session_internal,
     run_dlg,
     save_text,
+    waveform_ylim,
 )
 from scripts.train import build_dataset, build_loso_split
 
@@ -128,7 +129,12 @@ def flatten_result(summary: Dict, elapsed_sec: float) -> Dict:
         "mse_to_clean": summary["final_reconstruction"].get("mse_to_clean"),
         "corr_to_clean": summary["final_reconstruction"].get("corr_to_clean"),
         "trial_laplace_epsilon": float(summary["trial_laplace"]["epsilon"]),
+        "trial_laplace_applied_to": summary["trial_laplace"].get("applied_to", "trial"),
         "trial_laplace_scale": float(summary["trial_laplace"]["scale"]),
+        "trial_laplace_noise_rms": float(summary["trial_laplace"].get("noise_rms", 0.0)),
+        "trial_laplace_grad_rms": float(summary["trial_laplace"].get("grad_rms", 0.0)),
+        "trial_laplace_num_noisy_tensors": int(summary["trial_laplace"].get("num_noisy_tensors", 0)),
+        "trial_laplace_num_noisy_elements": int(summary["trial_laplace"].get("num_noisy_elements", 0)),
         "trial_laplace_target_mse_to_clean": float(summary["trial_laplace"]["target_mse_to_clean"]),
         "trial_laplace_target_corr_to_clean": float(summary["trial_laplace"]["target_corr_to_clean"]),
         "final_grad_loss": float(summary["history"][-1]["grad_loss"]) if summary["history"] else None,
@@ -163,7 +169,12 @@ def format_csv(rows: List[Dict], topk: int) -> str:
         "mse_to_clean",
         "corr_to_clean",
         "trial_laplace_epsilon",
+        "trial_laplace_applied_to",
         "trial_laplace_scale",
+        "trial_laplace_noise_rms",
+        "trial_laplace_grad_rms",
+        "trial_laplace_num_noisy_tensors",
+        "trial_laplace_num_noisy_elements",
         "trial_laplace_target_mse_to_clean",
         "trial_laplace_target_corr_to_clean",
         "final_grad_loss",
@@ -219,7 +230,7 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
         f"eval_session     : internal={args.eval_session_internal}, original={args.eval_session_original}",
         f"attack_head      : {args.attack_head}",
         f"label_mode       : {args.label_mode}",
-        f"trial_laplace    : epsilon={args.trial_laplace_epsilon}, sensitivity={args.trial_laplace_sensitivity}",
+        f"trial_laplace    : applied_to=gradients, epsilon={args.trial_laplace_epsilon}, sensitivity={args.trial_laplace_sensitivity}",
         f"iters/log_every  : {args.iters}/{args.log_every}",
         f"n_selected       : {len(selected_indices)}",
         f"selected_range   : {min(selected_indices)}..{max(selected_indices)}" if selected_indices else "selected_range   : n/a",
@@ -284,40 +295,65 @@ def plot_waveform_grid(
     panel_dir = out_dir / "batch_waveform_panels"
     panel_dir.mkdir(parents=True, exist_ok=True)
 
-    for ax, row in zip(axes.flat, rows):
+    plot_items = []
+    for row in rows:
         recon_path = out_dir / f"user_{row['user']:02d}_trial_{row['trial_index']}" / "reconstruction.pt"
         if not recon_path.exists():
             recon_path = out_dir / f"trial_{row['trial_index']}_user_{row['user']:02d}" / "reconstruction.pt"
         payload = torch.load(recon_path, map_location="cpu")
         real_x = payload["real_x"][0]
+        clean_x = payload.get("clean_x", payload["real_x"])[0]
         recon_x = payload["recon_x"][0]
-        channel = choose_channel(real_x, plot_channel)
+        channel = choose_channel(clean_x, plot_channel)
         time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
 
         target = real_x[channel].numpy()
         recon = recon_x[channel].numpy()
-        ax.plot(time_ms, target, linewidth=1.5, color="#111111")
-        ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9)
+        plot_items.append(
+            {
+                "row": row,
+                "time_ms": time_ms,
+                "target": target,
+                "recon": recon,
+            }
+        )
+
+    if plot_items:
+        y_limits = waveform_ylim(np.concatenate([item["target"] for item in plot_items]))
+    else:
+        y_limits = (-1.0, 1.0)
+
+    for ax, item in zip(axes.flat, plot_items):
+        row = item["row"]
+        time_ms = item["time_ms"]
+        target = item["target"]
+        recon = item["recon"]
+        ax.plot(time_ms, target, linewidth=1.5, color="#111111", label="Target")
+        ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
+        ax.set_ylim(*y_limits)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
         ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
+        ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
         if show_grid:
             ax.grid(alpha=0.22)
 
         panel_path = panel_dir / f"trial_{row['trial_index']}_user_{row['user']:02d}.png"
         panel_fig, panel_ax = plt.subplots(figsize=(4.8, 3.0))
-        panel_ax.plot(time_ms, target, linewidth=1.5, color="#111111")
-        panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9)
+        panel_ax.plot(time_ms, target, linewidth=1.5, color="#111111", label="Target")
+        panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
+        panel_ax.set_ylim(*y_limits)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
         panel_ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
+        panel_ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
         if show_grid:
             panel_ax.grid(alpha=0.22)
         panel_fig.tight_layout()
         panel_fig.savefig(panel_path, dpi=180)
         plt.close(panel_fig)
 
-    for ax in axes.flat[len(rows):]:
+    for ax in axes.flat[len(plot_items):]:
         ax.axis("off")
 
     fig.tight_layout()
