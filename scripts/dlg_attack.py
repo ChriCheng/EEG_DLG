@@ -492,9 +492,16 @@ def save_waveform_trajectory(
         ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
         ax.set_ylim(*y_limits)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
-        ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        ax.set_ylabel("Amplitude (μV)", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
-        ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
+        legend = ax.legend(
+            fontsize=max(font_size - 1.0, 6.0),
+            frameon=True,
+            loc="upper right",
+            edgecolor="black",
+            fancybox=False,
+        )
+        legend.get_frame().set_linewidth(0.8)
         if show_grid:
             ax.grid(alpha=0.22)
 
@@ -505,9 +512,16 @@ def save_waveform_trajectory(
         panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
         panel_ax.set_ylim(*y_limits)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
-        panel_ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        panel_ax.set_ylabel("Amplitude (μV)", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
-        panel_ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
+        legend = panel_ax.legend(
+            fontsize=max(font_size - 1.0, 6.0),
+            frameon=True,
+            loc="upper right",
+            edgecolor="black",
+            fancybox=False,
+        )
+        legend.get_frame().set_linewidth(0.8)
         if show_grid:
             panel_ax.grid(alpha=0.22)
         panel_fig.tight_layout()

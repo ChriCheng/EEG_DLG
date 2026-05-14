@@ -1,123 +1,135 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON=${PYTHON:-/home/ubuntu/miniconda3/envs/PP310/bin/python}
+# ==============================================================================
+# DLG_EEGNet 参数填写区
+#
+# 单次 DLG 攻击。checkpoint 和 out_dir 留空时会按下面参数自动生成。
+# eval_session 留空表示不限制 session；indices 留空表示随机选样本。
+# ==============================================================================
+python_bin="/home/ubuntu/miniconda3/envs/PP310/bin/python"
 
-DATASET=${DATASET:-P300}
-MODEL=${MODEL:-EEGNet}
-DATA_DIR=${DATA_DIR:-data/${DATASET}}
-NORMALIZE=${NORMALIZE:-channel}
-EUCLIDEAN_ALIGN=${EUCLIDEAN_ALIGN:-1}
-DEVICE=${DEVICE:-auto}
+dataset="P300"
+model="EEGNet"
+seed="0"
+train_session=""
+eval_session=""
+split="test"
+indices=""
+batch_size="1"
 
-SEED=${SEED:-0}
-EVAL_SESSION=${EVAL_SESSION:-}
-if [[ -z "${TRAIN_SESSION:-}" ]]; then
-  if [[ -n "$EVAL_SESSION" ]]; then
-    TRAIN_SESSION=2
+attack_head="task"
+label_mode="idlg"
+iters="30"
+lr="1.0"
+optimizer="lbfgs"
+log_every="2"
+topk="3"
+
+epsilon="0"
+trial_laplace_sensitivity="1.0"
+
+plot_channel="-1"
+sfreq="128"
+waveform_grid="0"
+waveform_font_size="16"
+
+normalize="channel"
+euclidean_align="1"
+device="auto"
+user_hidden_dim="256"
+user_dropout="0.5"
+checkpoint=""
+out_dir=""
+
+data_dir="data/${dataset}"
+if [[ -z "$train_session" ]]; then
+  if [[ -n "$eval_session" ]]; then
+    train_session="2"
   else
-    TRAIN_SESSION=3
+    train_session="3"
   fi
 fi
-if [[ -z "${RUN_NAME:-}" ]]; then
-  if [[ -n "$EVAL_SESSION" ]]; then
-    RUN_NAME="p300_eegnet_channel_leave_session_${EVAL_SESSION}"
-  else
-    RUN_NAME="p300_eegnet_channel"
-  fi
+if [[ -n "$eval_session" ]]; then
+  run_name="p300_eegnet_channel_leave_session_${eval_session}"
+else
+  run_name="p300_eegnet_channel"
 fi
-FOLD_NAME=${FOLD_NAME:-seed_${SEED}_train_session_${TRAIN_SESSION}${EVAL_SESSION:+_holdout_session_${EVAL_SESSION}}}
-
-BATCH_SIZE=${BATCH_SIZE:-1}
-INDICES=${INDICES:-}
-SPLIT=${SPLIT:-test}
-ATTACK_HEAD=${ATTACK_HEAD:-task}
-if [[ -z "${CHECKPOINT:-}" ]]; then
-  CHECKPOINT=checkpoint/checkpoints_2stage_${MODEL}/${RUN_NAME}/${FOLD_NAME}/best_user_by_acc.pth
-fi
-LABEL_MODE=${LABEL_MODE:-idlg}
-ITERS=${ITERS:-30}
-LR=${LR:-1.0}
-OPTIMIZER=${OPTIMIZER:-lbfgs}
-LOG_EVERY=${LOG_EVERY:-2}
-TOPK=${TOPK:-3}
-PLOT_CHANNEL=${PLOT_CHANNEL:--1}
-SFREQ=${SFREQ:-128}
-WAVEFORM_GRID=${WAVEFORM_GRID:-0}
-WAVEFORM_FONT_SIZE=${WAVEFORM_FONT_SIZE:-16}
-EPSILON=${EPSILON:-0}
-TRIAL_LAPLACE_SENSITIVITY=${TRIAL_LAPLACE_SENSITIVITY:-1.0}
-
-USER_HIDDEN_DIM=${USER_HIDDEN_DIM:-256}
-USER_DROPOUT=${USER_DROPOUT:-0.5}
-EVAL_TAG=${EVAL_SESSION:-4}
-INDICES_TAG=${INDICES:-random}
-INDICES_TAG=${INDICES_TAG//,/p}
-INDICES_TAG=${INDICES_TAG// /}
-EPSILON_TAG=${EPSILON//./p}
-EPSILON_TAG=${EPSILON_TAG//-/m}
-EPSILON_TAG=${EPSILON_TAG//+/p}
-SENSITIVITY_TAG=${TRIAL_LAPLACE_SENSITIVITY//./p}
-SENSITIVITY_TAG=${SENSITIVITY_TAG//-/m}
-SENSITIVITY_TAG=${SENSITIVITY_TAG//+/p}
-DP_TAG="eps${EPSILON_TAG}_sens${SENSITIVITY_TAG}"
-AUTO_OUT_DIR=0
-if [[ -z "${OUT_DIR:-}" ]]; then
-  AUTO_OUT_DIR=1
-  OUT_DIR=checkpoint/dlg_attack/${DATASET}_${MODEL}_${ATTACK_HEAD}_${LABEL_MODE}_seed${SEED}_train${TRAIN_SESSION}_split${SPLIT}_eval${EVAL_TAG}_batch${BATCH_SIZE}_trial${INDICES_TAG}_${DP_TAG}
+fold_name="seed_${seed}_train_session_${train_session}${eval_session:+_holdout_session_${eval_session}}"
+if [[ -z "$checkpoint" ]]; then
+  checkpoint="checkpoint/checkpoints_2stage_${model}/${run_name}/${fold_name}/best_user_by_acc.pth"
 fi
 
-EXTRA_ARGS=()
-if [[ "$EUCLIDEAN_ALIGN" == "1" || "$EUCLIDEAN_ALIGN" == "true" ]]; then
-  EXTRA_ARGS+=(--euclidean_align)
+eval_tag="${eval_session:-4}"
+indices_tag="${indices:-random}"
+indices_tag="${indices_tag//,/p}"
+indices_tag="${indices_tag// /}"
+epsilon_tag="${epsilon//./p}"
+epsilon_tag="${epsilon_tag//-/m}"
+epsilon_tag="${epsilon_tag//+/p}"
+sensitivity_tag="${trial_laplace_sensitivity//./p}"
+sensitivity_tag="${sensitivity_tag//-/m}"
+sensitivity_tag="${sensitivity_tag//+/p}"
+dp_tag="eps${epsilon_tag}_sens${sensitivity_tag}"
+
+auto_out_dir="0"
+if [[ -z "$out_dir" ]]; then
+  auto_out_dir="1"
+  out_dir="checkpoint/dlg_attack/${dataset}_${model}_${attack_head}_${label_mode}_seed${seed}_train${train_session}_split${split}_eval${eval_tag}_batch${batch_size}_trial${indices_tag}_${dp_tag}"
 fi
-if [[ -n "$EVAL_SESSION" ]]; then
-  EXTRA_ARGS+=(--eval_session_original "$EVAL_SESSION")
+
+extra_args=()
+if [[ "$euclidean_align" == "1" || "$euclidean_align" == "true" ]]; then
+  extra_args+=(--euclidean_align)
 fi
-if [[ -n "$INDICES" ]]; then
-  EXTRA_ARGS+=(--indices "$INDICES")
+if [[ -n "$eval_session" ]]; then
+  extra_args+=(--eval_session_original "$eval_session")
 fi
-if [[ "$AUTO_OUT_DIR" == "1" ]]; then
-  EXTRA_ARGS+=(--append_indices_to_out_dir)
+if [[ -n "$indices" ]]; then
+  extra_args+=(--indices "$indices")
 fi
-if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
-  EXTRA_ARGS+=(--trial_laplace_epsilon "$EPSILON")
-  EXTRA_ARGS+=(--trial_laplace_sensitivity "$TRIAL_LAPLACE_SENSITIVITY")
+if [[ "$auto_out_dir" == "1" ]]; then
+  extra_args+=(--append_indices_to_out_dir)
 fi
-if [[ "$WAVEFORM_GRID" == "0" || "$WAVEFORM_GRID" == "false" || "$WAVEFORM_GRID" == "False" || "$WAVEFORM_GRID" == "off" || "$WAVEFORM_GRID" == "no" ]]; then
-  EXTRA_ARGS+=(--no-waveform_grid)
+if [[ "$epsilon" != "0" && "$epsilon" != "0.0" && -n "$epsilon" ]]; then
+  extra_args+=(--trial_laplace_epsilon "$epsilon")
+  extra_args+=(--trial_laplace_sensitivity "$trial_laplace_sensitivity")
+fi
+if [[ "$waveform_grid" == "0" || "$waveform_grid" == "false" || "$waveform_grid" == "False" || "$waveform_grid" == "off" || "$waveform_grid" == "no" ]]; then
+  extra_args+=(--no-waveform_grid)
 fi
 
 echo
 echo "================================================================================"
-echo "[DLG_EEGNet] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
-echo "[DLG_EEGNet] split=${SPLIT} eval_session=${EVAL_SESSION:-all} indices=${INDICES:-random} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE} batch_size=${BATCH_SIZE} iters=${ITERS}"
-echo "[DLG_EEGNet] plot_channel=${PLOT_CHANNEL} waveform_grid=${WAVEFORM_GRID} waveform_font_size=${WAVEFORM_FONT_SIZE}"
-echo "[DLG_EEGNet] gradient_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
-echo "[DLG_EEGNet] out_dir=${OUT_DIR}"
+echo "[DLG_EEGNet] dataset=$dataset model=$model checkpoint=$checkpoint"
+echo "[DLG_EEGNet] split=$split eval_session=${eval_session:-all} indices=${indices:-random} batch_size=$batch_size"
+echo "[DLG_EEGNet] attack_head=$attack_head label_mode=$label_mode iters=$iters lr=$lr optimizer=$optimizer"
+echo "[DLG_EEGNet] epsilon=$epsilon sensitivity=$trial_laplace_sensitivity"
+echo "[DLG_EEGNet] plot_channel=$plot_channel waveform_grid=$waveform_grid waveform_font_size=$waveform_font_size"
+echo "[DLG_EEGNet] out_dir=$out_dir"
 echo "================================================================================"
 
-exec "$PYTHON" -u -m scripts.dlg_attack \
-  --checkpoint "$CHECKPOINT" \
-  --dataset "$DATASET" \
-  --data_dir "$DATA_DIR" \
-  --model "$MODEL" \
-  --normalize "$NORMALIZE" \
-  --device "$DEVICE" \
-  --seed "$SEED" \
-  --split "$SPLIT" \
-  --batch_size "$BATCH_SIZE" \
-  --attack_head "$ATTACK_HEAD" \
-  --label_mode "$LABEL_MODE" \
-  --iters "$ITERS" \
-  --lr "$LR" \
-  --optimizer "$OPTIMIZER" \
-  --log_every "$LOG_EVERY" \
-  --topk "$TOPK" \
-  --plot_channel "$PLOT_CHANNEL" \
-  --sfreq "$SFREQ" \
-  --waveform_font_size "$WAVEFORM_FONT_SIZE" \
-  --user_hidden_dim "$USER_HIDDEN_DIM" \
-  --user_dropout "$USER_DROPOUT" \
-  --out_dir "$OUT_DIR" \
-  "${EXTRA_ARGS[@]}"
+exec "$python_bin" -u -m scripts.dlg_attack \
+  --checkpoint "$checkpoint" \
+  --dataset "$dataset" \
+  --data_dir "$data_dir" \
+  --model "$model" \
+  --normalize "$normalize" \
+  --device "$device" \
+  --seed "$seed" \
+  --split "$split" \
+  --batch_size "$batch_size" \
+  --attack_head "$attack_head" \
+  --label_mode "$label_mode" \
+  --iters "$iters" \
+  --lr "$lr" \
+  --optimizer "$optimizer" \
+  --log_every "$log_every" \
+  --topk "$topk" \
+  --plot_channel "$plot_channel" \
+  --sfreq "$sfreq" \
+  --waveform_font_size "$waveform_font_size" \
+  --user_hidden_dim "$user_hidden_dim" \
+  --user_dropout "$user_dropout" \
+  --out_dir "$out_dir" \
+  "${extra_args[@]}"

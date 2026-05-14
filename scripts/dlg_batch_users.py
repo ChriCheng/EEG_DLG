@@ -397,9 +397,16 @@ def plot_waveform_grid(
         ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
         ax.set_ylim(*y_limits)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
-        ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        ax.set_ylabel("Amplitude (μV)", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
-        ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
+        legend = ax.legend(
+            fontsize=max(font_size - 1.0, 6.0),
+            frameon=True,
+            loc="upper right",
+            edgecolor="black",
+            fancybox=False,
+        )
+        legend.get_frame().set_linewidth(0.8)
         if show_grid:
             ax.grid(alpha=0.22)
 
@@ -409,9 +416,16 @@ def plot_waveform_grid(
         panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
         panel_ax.set_ylim(*y_limits)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
-        panel_ax.set_ylabel("Amplitude (a.u.)", fontsize=font_size)
+        panel_ax.set_ylabel("Amplitude (μV)", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
-        panel_ax.legend(fontsize=max(font_size - 1.0, 6.0), frameon=False)
+        legend = panel_ax.legend(
+            fontsize=max(font_size - 1.0, 6.0),
+            frameon=True,
+            loc="upper right",
+            edgecolor="black",
+            fancybox=False,
+        )
+        legend.get_frame().set_linewidth(0.8)
         if show_grid:
             panel_ax.grid(alpha=0.22)
         panel_fig.tight_layout()
@@ -494,7 +508,8 @@ def plot_leakage_bars(rows: List[Dict], out_dir: Path, topk: int) -> str:
     ax.set_ylabel("Score")
     ax.set_title("Identity leakage: real vs reconstructed vs noise")
     ax.grid(axis="y", alpha=0.22)
-    ax.legend(frameon=False, loc="upper left")
+    legend = ax.legend(frameon=True, loc="upper right", edgecolor="black", fancybox=False)
+    legend.get_frame().set_linewidth(0.8)
     fig.tight_layout()
     path = out_dir / "batch_identity_leakage_bars.png"
     fig.savefig(path, dpi=180)
@@ -627,6 +642,18 @@ def main() -> None:
         selected_indices = selected_indices[args.start_offset:]
     if args.max_trials:
         selected_indices = selected_indices[:args.max_trials]
+    if args.selection == "balanced_per_user" and args.max_trials and args.max_trials % ds.n_users == 0:
+        expected_per_user = args.max_trials // ds.n_users
+        counts_by_user: Dict[int, int] = {u: 0 for u in range(ds.n_users)}
+        for idx in selected_indices:
+            counts_by_user[int(ds.y_user[idx].item())] += 1
+        bad_counts = {u: c for u, c in counts_by_user.items() if c != expected_per_user}
+        if bad_counts:
+            raise ValueError(
+                "balanced_per_user did not produce the requested equal user counts: "
+                f"expected {expected_per_user} per user for MAX_TRIALS={args.max_trials}, "
+                f"got {counts_by_user}. Check that every user has enough candidate trials."
+            )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

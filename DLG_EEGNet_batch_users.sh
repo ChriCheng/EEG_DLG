@@ -1,122 +1,133 @@
 #!/usr/bin/env bash
-# MAX_TRIALS=400 EPSILON=0 nohup bash ./DLG_EEGNet_batch_users.sh &> logs/batchiDLG400_ep0.log &
-# MAX_TRIALS=400 EPSILON=10 nohup bash ./DLG_EEGNet_batch_users.sh &> logs/batchiDLG400_ep10.log &
-
 set -euo pipefail
 
-PYTHON=${PYTHON:-/home/ubuntu/miniconda3/envs/PP310/bin/python}
+# ==============================================================================
+# DLG_EEGNet_batch_users 参数填写区
+#
+# 批量 DLG 攻击。checkpoint 和 out_dir 留空时会按下面参数自动生成。
+# none-noise 通常设 epsilon="0"，加噪声通常设 epsilon="10" 或其它值。
+# ==============================================================================
+python_bin="/home/ubuntu/miniconda3/envs/PP310/bin/python"
 
-DATASET=${DATASET:-P300}
-MODEL=${MODEL:-EEGNet}
-DATA_DIR=${DATA_DIR:-data/${DATASET}}
-NORMALIZE=${NORMALIZE:-channel}
-EUCLIDEAN_ALIGN=${EUCLIDEAN_ALIGN:-1}
-DEVICE=${DEVICE:-auto}
+dataset="P300"
+model="EEGNet"
+seed="0"
+train_session=""
+eval_session="4"
+split="test"
+selection="balanced_per_user"
+max_trials="200"
+start_offset="0"
 
-SEED=${SEED:-0}
-SPLIT=${SPLIT:-test}
-EVAL_SESSION=${EVAL_SESSION:-4}
-if [[ -z "${TRAIN_SESSION:-}" ]]; then
-  if [[ -n "$EVAL_SESSION" ]]; then
-    TRAIN_SESSION=2
+attack_head="task"
+label_mode="idlg"
+iters="33"
+lr="1.0"
+optimizer="lbfgs"
+log_every="3"
+topk="3"
+
+epsilon="0"
+trial_laplace_sensitivity="1.0"
+
+skip_figures="1"
+keep_trial_artifacts="0"
+plot_channel="-1"
+sfreq="128"
+waveform_grid="1"
+waveform_font_size="10"
+
+normalize="channel"
+euclidean_align="1"
+device="auto"
+user_hidden_dim="256"
+user_dropout="0.5"
+checkpoint=""
+out_dir=""
+
+data_dir="data/${dataset}"
+if [[ -z "$train_session" ]]; then
+  if [[ -n "$eval_session" ]]; then
+    train_session="2"
   else
-    TRAIN_SESSION=3
+    train_session="3"
   fi
 fi
-SELECTION=${SELECTION:-all}
-if [[ -z "${RUN_NAME:-}" ]]; then
-  if [[ -n "$EVAL_SESSION" ]]; then
-    RUN_NAME="p300_eegnet_channel_leave_session_${EVAL_SESSION}"
-  else
-    RUN_NAME="p300_eegnet_channel"
-  fi
+if [[ -n "$eval_session" ]]; then
+  run_name="p300_eegnet_channel_leave_session_${eval_session}"
+else
+  run_name="p300_eegnet_channel"
 fi
-FOLD_NAME=${FOLD_NAME:-seed_${SEED}_train_session_${TRAIN_SESSION}${EVAL_SESSION:+_holdout_session_${EVAL_SESSION}}}
-ATTACK_HEAD=${ATTACK_HEAD:-task}
-if [[ -z "${CHECKPOINT:-}" ]]; then
-  CHECKPOINT=checkpoint/checkpoints_2stage_${MODEL}/${RUN_NAME}/${FOLD_NAME}/best_user_by_acc.pth
+fold_name="seed_${seed}_train_session_${train_session}${eval_session:+_holdout_session_${eval_session}}"
+if [[ -z "$checkpoint" ]]; then
+  checkpoint="checkpoint/checkpoints_2stage_${model}/${run_name}/${fold_name}/best_user_by_acc.pth"
 fi
-LABEL_MODE=${LABEL_MODE:-idlg}
-ITERS=${ITERS:-33}
-LR=${LR:-1.0}
-OPTIMIZER=${OPTIMIZER:-lbfgs}
-LOG_EVERY=${LOG_EVERY:-3}
-TOPK=${TOPK:-3}
-SKIP_FIGURES=${SKIP_FIGURES:-1}
-KEEP_TRIAL_ARTIFACTS=${KEEP_TRIAL_ARTIFACTS:-0}
-MAX_TRIALS=${MAX_TRIALS:-200}
-START_OFFSET=${START_OFFSET:-0}
-EPSILON=${EPSILON:-0}
-TRIAL_LAPLACE_SENSITIVITY=${TRIAL_LAPLACE_SENSITIVITY:-1.0}
 
-USER_HIDDEN_DIM=${USER_HIDDEN_DIM:-256}
-USER_DROPOUT=${USER_DROPOUT:-0.5}
-PLOT_CHANNEL=${PLOT_CHANNEL:--1}
-SFREQ=${SFREQ:-128}
-WAVEFORM_GRID=${WAVEFORM_GRID:-1}
-WAVEFORM_FONT_SIZE=${WAVEFORM_FONT_SIZE:-10}
-EPSILON_TAG=${EPSILON//./p}
-EPSILON_TAG=${EPSILON_TAG//-/m}
-EPSILON_TAG=${EPSILON_TAG//+/p}
-SENSITIVITY_TAG=${TRIAL_LAPLACE_SENSITIVITY//./p}
-SENSITIVITY_TAG=${SENSITIVITY_TAG//-/m}
-SENSITIVITY_TAG=${SENSITIVITY_TAG//+/p}
-DP_TAG="eps${EPSILON_TAG}_sens${SENSITIVITY_TAG}"
-OUT_DIR=${OUT_DIR:-checkpoint/dlg_attack_batch/${DATASET}_${MODEL}_${ATTACK_HEAD}_${LABEL_MODE}_seed${SEED}_train${TRAIN_SESSION}_eval${EVAL_SESSION:-all}_${SELECTION}_${DP_TAG}}
+epsilon_tag="${epsilon//./p}"
+epsilon_tag="${epsilon_tag//-/m}"
+epsilon_tag="${epsilon_tag//+/p}"
+sensitivity_tag="${trial_laplace_sensitivity//./p}"
+sensitivity_tag="${sensitivity_tag//-/m}"
+sensitivity_tag="${sensitivity_tag//+/p}"
+dp_tag="eps${epsilon_tag}_sens${sensitivity_tag}"
+if [[ -z "$out_dir" ]]; then
+  out_dir="checkpoint/dlg_attack_batch/${dataset}_${model}_${attack_head}_${label_mode}_seed${seed}_train${train_session}_eval${eval_session:-all}_${selection}_${dp_tag}"
+fi
 
-EXTRA_ARGS=()
-if [[ "$EUCLIDEAN_ALIGN" == "1" || "$EUCLIDEAN_ALIGN" == "true" ]]; then
-  EXTRA_ARGS+=(--euclidean_align)
+extra_args=()
+if [[ "$euclidean_align" == "1" || "$euclidean_align" == "true" ]]; then
+  extra_args+=(--euclidean_align)
 fi
-if [[ -n "$EVAL_SESSION" ]]; then
-  EXTRA_ARGS+=(--eval_session_original "$EVAL_SESSION")
+if [[ -n "$eval_session" ]]; then
+  extra_args+=(--eval_session_original "$eval_session")
 fi
-if [[ "$SKIP_FIGURES" == "1" || "$SKIP_FIGURES" == "true" ]]; then
-  EXTRA_ARGS+=(--skip_figures)
+if [[ "$skip_figures" == "1" || "$skip_figures" == "true" ]]; then
+  extra_args+=(--skip_figures)
 fi
-if [[ "$KEEP_TRIAL_ARTIFACTS" == "1" || "$KEEP_TRIAL_ARTIFACTS" == "true" ]]; then
-  EXTRA_ARGS+=(--keep_trial_artifacts)
+if [[ "$keep_trial_artifacts" == "1" || "$keep_trial_artifacts" == "true" ]]; then
+  extra_args+=(--keep_trial_artifacts)
 fi
-if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
-  EXTRA_ARGS+=(--trial_laplace_epsilon "$EPSILON")
-  EXTRA_ARGS+=(--trial_laplace_sensitivity "$TRIAL_LAPLACE_SENSITIVITY")
+if [[ "$epsilon" != "0" && "$epsilon" != "0.0" && -n "$epsilon" ]]; then
+  extra_args+=(--trial_laplace_epsilon "$epsilon")
+  extra_args+=(--trial_laplace_sensitivity "$trial_laplace_sensitivity")
 fi
-if [[ "$WAVEFORM_GRID" == "0" || "$WAVEFORM_GRID" == "false" || "$WAVEFORM_GRID" == "False" || "$WAVEFORM_GRID" == "off" || "$WAVEFORM_GRID" == "no" ]]; then
-  EXTRA_ARGS+=(--no-waveform_grid)
+if [[ "$waveform_grid" == "0" || "$waveform_grid" == "false" || "$waveform_grid" == "False" || "$waveform_grid" == "off" || "$waveform_grid" == "no" ]]; then
+  extra_args+=(--no-waveform_grid)
 fi
 
 echo
 echo "================================================================================"
-echo "[DLG_EEGNet_batch_users] dataset=${DATASET} model=${MODEL} checkpoint=${CHECKPOINT}"
-echo "[DLG_EEGNet_batch_users] selection=${SELECTION} | split=${SPLIT} eval_session=${EVAL_SESSION:-all} attack_head=${ATTACK_HEAD} label_mode=${LABEL_MODE}"
-echo "[DLG_EEGNet_batch_users] iters=${ITERS} log_every=${LOG_EVERY} max_trials=${MAX_TRIALS} start_offset=${START_OFFSET} out_dir=${OUT_DIR}"
-echo "[DLG_EEGNet_batch_users] plot_channel=${PLOT_CHANNEL} waveform_grid=${WAVEFORM_GRID} waveform_font_size=${WAVEFORM_FONT_SIZE}"
-echo "[DLG_EEGNet_batch_users] gradient_laplace_epsilon=${EPSILON} sensitivity=${TRIAL_LAPLACE_SENSITIVITY}"
+echo "[DLG_EEGNet_batch_users] dataset=$dataset model=$model checkpoint=$checkpoint"
+echo "[DLG_EEGNet_batch_users] split=$split eval_session=${eval_session:-all} selection=$selection max_trials=$max_trials start_offset=$start_offset"
+echo "[DLG_EEGNet_batch_users] attack_head=$attack_head label_mode=$label_mode iters=$iters lr=$lr optimizer=$optimizer"
+echo "[DLG_EEGNet_batch_users] epsilon=$epsilon sensitivity=$trial_laplace_sensitivity"
+echo "[DLG_EEGNet_batch_users] skip_figures=$skip_figures keep_trial_artifacts=$keep_trial_artifacts"
+echo "[DLG_EEGNet_batch_users] out_dir=$out_dir"
 echo "================================================================================"
 
-exec "$PYTHON" -u -m scripts.dlg_batch_users \
-  --checkpoint "$CHECKPOINT" \
-  --dataset "$DATASET" \
-  --data_dir "$DATA_DIR" \
-  --model "$MODEL" \
-  --normalize "$NORMALIZE" \
-  --device "$DEVICE" \
-  --seed "$SEED" \
-  --split "$SPLIT" \
-  --selection "$SELECTION" \
-  --attack_head "$ATTACK_HEAD" \
-  --label_mode "$LABEL_MODE" \
-  --iters "$ITERS" \
-  --lr "$LR" \
-  --optimizer "$OPTIMIZER" \
-  --log_every "$LOG_EVERY" \
-  --topk "$TOPK" \
-  --user_hidden_dim "$USER_HIDDEN_DIM" \
-  --user_dropout "$USER_DROPOUT" \
-  --plot_channel "$PLOT_CHANNEL" \
-  --sfreq "$SFREQ" \
-  --waveform_font_size "$WAVEFORM_FONT_SIZE" \
-  --max_trials "$MAX_TRIALS" \
-  --start_offset "$START_OFFSET" \
-  --out_dir "$OUT_DIR" \
-  "${EXTRA_ARGS[@]}"
+exec "$python_bin" -u -m scripts.dlg_batch_users \
+  --checkpoint "$checkpoint" \
+  --dataset "$dataset" \
+  --data_dir "$data_dir" \
+  --model "$model" \
+  --normalize "$normalize" \
+  --device "$device" \
+  --seed "$seed" \
+  --split "$split" \
+  --selection "$selection" \
+  --attack_head "$attack_head" \
+  --label_mode "$label_mode" \
+  --iters "$iters" \
+  --lr "$lr" \
+  --optimizer "$optimizer" \
+  --log_every "$log_every" \
+  --topk "$topk" \
+  --user_hidden_dim "$user_hidden_dim" \
+  --user_dropout "$user_dropout" \
+  --plot_channel "$plot_channel" \
+  --sfreq "$sfreq" \
+  --waveform_font_size "$waveform_font_size" \
+  --max_trials "$max_trials" \
+  --start_offset "$start_offset" \
+  --out_dir "$out_dir" \
+  "${extra_args[@]}"
