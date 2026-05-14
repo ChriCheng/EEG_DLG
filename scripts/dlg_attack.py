@@ -107,14 +107,22 @@ def infer_idlg_label(
     target_grads: List[torch.Tensor | None],
     head: str,
 ) -> int:
-    candidates = []
     prefix = f"{head}_head"
+    bias_candidates = []
+    weight_candidates = []
     for (name, param), grad in zip(named_params, target_grads):
-        if grad is not None and name.startswith(prefix) and name.endswith("weight") and grad.ndim == 2:
-            candidates.append((name, grad.detach()))
-    if not candidates:
+        if grad is None or not name.startswith(prefix):
+            continue
+        if name.endswith("bias") and grad.ndim == 1:
+            bias_candidates.append((name, grad.detach()))
+        elif name.endswith("weight") and grad.ndim == 2:
+            weight_candidates.append((name, grad.detach()))
+    if bias_candidates:
+        _, bias_grad = bias_candidates[-1]
+        return int(torch.argmin(bias_grad).item())
+    if not weight_candidates:
         raise ValueError(f"Could not find a final classifier weight gradient for head={head!r}")
-    _, weight_grad = candidates[-1]
+    _, weight_grad = weight_candidates[-1]
     return int(torch.argmin(torch.sum(weight_grad, dim=-1)).item())
 
 
@@ -259,6 +267,28 @@ def task_accuracy(model: nn.Module, x: torch.Tensor, y_task: torch.Tensor) -> fl
     return float((pred == y_task).float().mean().item())
 
 
+@torch.no_grad()
+def task_details(model: nn.Module, x: torch.Tensor, y_task: torch.Tensor) -> List[Dict]:
+    logits = head_logits(model, x, head="task")
+    probs = F.softmax(logits, dim=1)
+    pred = logits.argmax(dim=1)
+    rows = []
+    for i in range(x.shape[0]):
+        true_task = int(y_task[i].item())
+        rows.append(
+            {
+                "sample_in_batch": i,
+                "true_task": true_task,
+                "pred_task": int(pred[i].item()),
+                "correct": bool((pred[i] == y_task[i]).item()),
+                "true_task_conf": float(probs[i, true_task].item()),
+                "task_logits": [float(v) for v in logits[i].detach().cpu().tolist()],
+                "task_probs": [float(v) for v in probs[i].detach().cpu().tolist()],
+            }
+        )
+    return rows
+
+
 def resolve_eval_session_internal(
     ds,
     eval_session_internal: int | None,
@@ -345,7 +375,8 @@ def format_summary_text(summary: Dict) -> str:
         f"model            : {summary['model']}",
         f"checkpoint       : {summary['checkpoint']}",
         f"checkpoint_epoch : {summary['checkpoint_epoch']}",
-        f"attack_head      : {summary['attack_head']}",
+        f"attack_head      : {summary['attack_head']} (gradient/iDLG reconstruction)",
+        "eval_heads       : task metrics use task_head; UIA metrics use user_head",
         f"label_mode       : {summary['label_info']['label_mode']}",
         f"batch_indices    : {summary['batch_indices']}",
         f"y_task           : {summary['y_task']}",
@@ -422,8 +453,9 @@ def choose_plot_channel(real_x: torch.Tensor, requested_channel: int) -> int:
     return int(torch.var(real_x, dim=1).argmax().item())
 
 
-def waveform_ylim(target: np.ndarray) -> Tuple[float, float]:
-    all_values = target.reshape(-1)
+def waveform_ylim(target: np.ndarray, recons: List[np.ndarray]) -> Tuple[float, float]:
+    values = [target.reshape(-1)] + [recon.reshape(-1) for recon in recons]
+    all_values = np.concatenate(values)
     finite_values = all_values[np.isfinite(all_values)]
     if finite_values.size == 0:
         return -1.0, 1.0
@@ -449,7 +481,7 @@ def save_waveform_trajectory(
     channel = choose_plot_channel(clean_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
     recon_series = [snapshot["tensor"][channel].detach().cpu().numpy() for snapshot in snapshots]
-    y_limits = waveform_ylim(target)
+    y_limits = waveform_ylim(target, recon_series)
     time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
     cols = min(3, len(snapshots))
     rows = math.ceil(len(snapshots) / cols)
@@ -739,6 +771,11 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         "noise": identity_details(model, noise, y_user, topk),
     }
     summary["identity_details"] = detail_rows
+    summary["task_details"] = {
+        "recon": task_details(model, recon, y_task),
+        "real": task_details(model, x, y_task),
+        "noise": task_details(model, noise, y_task),
+    }
     if not no_visualizations:
         waveform_path = out_dir / "eeg_waveform_trajectory.png"
         plot_channel, panel_paths = save_waveform_trajectory(
@@ -816,7 +853,16 @@ def main() -> None:
     )
     parser.add_argument("--indices", type=str, default="")
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--attack_head", type=str, default="task", choices=["task", "user"])
+    parser.add_argument(
+        "--attack_head",
+        type=str,
+        default="task",
+        choices=["task", "user"],
+        help=(
+            "Head used to generate and match attack gradients. Reconstruction is evaluated "
+            "with both heads: task_head for task metrics and user_head for UIA metrics."
+        ),
+    )
     parser.add_argument("--label_mode", type=str, default="idlg", choices=["idlg", "true", "dlg"])
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1.0)

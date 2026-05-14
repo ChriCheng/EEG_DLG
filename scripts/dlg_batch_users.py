@@ -99,12 +99,56 @@ def select_all_trials(
     return filter_indices_by_session(ds, pool, eval_session_internal, split)
 
 
+def select_balanced_trials_per_user(
+    ds,
+    split: str,
+    train_session_internal: int | None,
+    seed: int,
+    eval_session_internal: int | None = None,
+) -> List[int]:
+    pool = select_all_trials(
+        ds=ds,
+        split=split,
+        train_session_internal=train_session_internal,
+        eval_session_internal=eval_session_internal,
+    )
+    by_user: Dict[int, List[int]] = {u: [] for u in range(ds.n_users)}
+    for idx in pool:
+        by_user[int(ds.y_user[idx].item())].append(idx)
+
+    rng = random.Random(seed)
+    users = list(range(ds.n_users))
+    rng.shuffle(users)
+    for user in users:
+        if not by_user[user]:
+            raise ValueError(f"No candidate trials for user={user} in split={split}")
+        rng.shuffle(by_user[user])
+
+    selected = []
+    offset = 0
+    while True:
+        added = False
+        for user in users:
+            candidates = by_user[user]
+            if offset < len(candidates):
+                selected.append(candidates[offset])
+                added = True
+        if not added:
+            break
+        offset += 1
+    return selected
+
+
 def flatten_result(summary: Dict, elapsed_sec: float) -> Dict:
     topk = summary["topk"]
     topk_key = f"user_top{topk}_acc"
     recon_metrics = summary["identity_metrics"]["recon"]
     real_metrics = summary["identity_metrics"]["real"]
     noise_metrics = summary["identity_metrics"]["noise"]
+    task_details = summary.get("task_details", {})
+    recon_task_detail = task_details.get("recon", [{}])[0]
+    real_task_detail = task_details.get("real", [{}])[0]
+    noise_task_detail = task_details.get("noise", [{}])[0]
     label_info = summary["label_info"]
     attack_label = int(label_info["attack_labels"][0])
     inferred = label_info.get("idlg_inferred_labels", label_info.get("optimized_labels", [None]))[0]
@@ -142,12 +186,20 @@ def flatten_result(summary: Dict, elapsed_sec: float) -> Dict:
         f"recon_user_top{topk}_acc": float(recon_metrics[topk_key]),
         "recon_true_user_conf": float(recon_metrics["true_user_conf"]),
         "recon_task_acc": float(recon_metrics["task_acc"]),
+        "recon_task_pred": recon_task_detail.get("pred_task"),
+        "recon_true_task_conf": recon_task_detail.get("true_task_conf"),
         "real_user_top1_acc": float(real_metrics["user_top1_acc"]),
         f"real_user_top{topk}_acc": float(real_metrics[topk_key]),
         "real_true_user_conf": float(real_metrics["true_user_conf"]),
+        "real_task_acc": float(real_metrics["task_acc"]),
+        "real_task_pred": real_task_detail.get("pred_task"),
+        "real_true_task_conf": real_task_detail.get("true_task_conf"),
         "noise_user_top1_acc": float(noise_metrics["user_top1_acc"]),
         f"noise_user_top{topk}_acc": float(noise_metrics[topk_key]),
         "noise_true_user_conf": float(noise_metrics["true_user_conf"]),
+        "noise_task_acc": float(noise_metrics["task_acc"]),
+        "noise_task_pred": noise_task_detail.get("pred_task"),
+        "noise_true_task_conf": noise_task_detail.get("true_task_conf"),
         "recon_topk_users": recon_detail["topk_users"],
         "recon_topk_probs": recon_detail["topk_probs"],
         "elapsed_sec": float(elapsed_sec),
@@ -182,12 +234,20 @@ def format_csv(rows: List[Dict], topk: int) -> str:
         f"recon_user_top{topk}_acc",
         "recon_true_user_conf",
         "recon_task_acc",
+        "recon_task_pred",
+        "recon_true_task_conf",
         "real_user_top1_acc",
         f"real_user_top{topk}_acc",
         "real_true_user_conf",
+        "real_task_acc",
+        "real_task_pred",
+        "real_true_task_conf",
         "noise_user_top1_acc",
         f"noise_user_top{topk}_acc",
         "noise_true_user_conf",
+        "noise_task_acc",
+        "noise_task_pred",
+        "noise_true_task_conf",
         "recon_topk_users",
         "recon_topk_probs",
         "elapsed_sec",
@@ -251,6 +311,8 @@ def format_report(rows: List[Dict], args: argparse.Namespace, selected_indices: 
         f"Recon User Top-{topk}        : {format_pct(mean(rows, topk_key))}",
         f"Recon True-user Conf    : {mean(rows, 'recon_true_user_conf'):.4f}",
         f"Recon Task Acc          : {format_pct(mean(rows, 'recon_task_acc'))}",
+        f"Real Task Acc           : {format_pct(mean(rows, 'real_task_acc'))}",
+        f"Noise Task Acc          : {format_pct(mean(rows, 'noise_task_acc'))}",
         f"Real User Top-1         : {format_pct(mean(rows, 'real_user_top1_acc'))}",
         f"Noise User Top-1        : {format_pct(mean(rows, 'noise_user_top1_acc'))}",
         f"mean elapsed/sample sec : {mean(rows, 'elapsed_sec'):.4f}",
@@ -319,7 +381,10 @@ def plot_waveform_grid(
         )
 
     if plot_items:
-        y_limits = waveform_ylim(np.concatenate([item["target"] for item in plot_items]))
+        y_limits = waveform_ylim(
+            np.concatenate([item["target"] for item in plot_items]),
+            [item["recon"] for item in plot_items],
+        )
     else:
         y_limits = (-1.0, 1.0)
 
@@ -448,7 +513,12 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"])
-    parser.add_argument("--selection", type=str, default="one_per_user", choices=["one_per_user", "all"])
+    parser.add_argument(
+        "--selection",
+        type=str,
+        default="one_per_user",
+        choices=["one_per_user", "all", "balanced_per_user"],
+    )
     parser.add_argument("--train_session_internal", type=int, default=None)
     parser.add_argument(
         "--eval_session_internal",
@@ -462,7 +532,16 @@ def main() -> None:
         default=None,
         help="Optionally restrict DLG sample selection to one original session label.",
     )
-    parser.add_argument("--attack_head", type=str, default="task", choices=["task", "user"])
+    parser.add_argument(
+        "--attack_head",
+        type=str,
+        default="task",
+        choices=["task", "user"],
+        help=(
+            "Head used to generate and match attack gradients. Reconstruction is evaluated "
+            "with both heads: task_head for task metrics and user_head for UIA metrics."
+        ),
+    )
     parser.add_argument("--label_mode", type=str, default="idlg", choices=["idlg", "true", "dlg"])
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1.0)
@@ -519,6 +598,14 @@ def main() -> None:
 
     if args.selection == "one_per_user":
         selected_indices = select_one_trial_per_user(
+            ds=ds,
+            split=args.split,
+            train_session_internal=train_session_internal,
+            seed=args.seed,
+            eval_session_internal=eval_session_internal,
+        )
+    elif args.selection == "balanced_per_user":
+        selected_indices = select_balanced_trials_per_user(
             ds=ds,
             split=args.split,
             train_session_internal=train_session_internal,

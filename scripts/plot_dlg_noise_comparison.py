@@ -45,6 +45,10 @@ FLOAT_FIELDS = {
     "noise_user_top1_acc",
     "noise_user_top3_acc",
     "noise_true_user_conf",
+    "real_task_acc",
+    "real_true_task_conf",
+    "noise_task_acc",
+    "noise_true_task_conf",
     "elapsed_sec",
 }
 
@@ -162,9 +166,9 @@ def save_metric_bars(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
     metrics = [
         ("MSE", "mse", True),
         ("Corr", "corr", False),
-        ("Recon Top-1", "recon_user_top1_acc", False),
-        ("Recon Top-3", "recon_user_top3_acc", False),
-        ("Task Acc", "recon_task_acc", False),
+        ("Recon UIA@1", "recon_user_top1_acc", False),
+        ("Recon UIA@3", "recon_user_top3_acc", False),
+        ("Real UIA@1", "real_user_top1_acc", False),
         ("True-user Conf", "recon_true_user_conf", False),
     ]
     labels = list(series_rows)
@@ -190,6 +194,103 @@ def save_metric_bars(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
     ax.legend(frameon=False, loc="upper left")
     fig.tight_layout()
     path = out_dir / "dlg_noise_comparison_metric_bars.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
+
+def save_identity_metrics(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
+    metrics = [
+        ("iDLG Label Acc", "label_correct"),
+        ("Recon UIA Top-1", "recon_user_top1_acc"),
+        ("Recon UIA Top-3", "recon_user_top3_acc"),
+        ("Recon True-user Conf", "recon_true_user_conf"),
+        ("Real-signal UIA Top-1", "real_user_top1_acc"),
+        ("Real True-user Conf", "real_true_user_conf"),
+    ]
+    labels = list(series_rows)
+    x = np.arange(len(metrics))
+    width = min(0.34, 0.78 / max(len(labels), 1))
+
+    fig, ax = plt.subplots(figsize=(14.2, 5.8))
+    for idx, label in enumerate(labels):
+        rows = series_rows[label]
+        bar_values = [mean(values(rows, key)) for _, key in metrics]
+        positions = x + (idx - (len(labels) - 1) / 2.0) * width
+        color = COLORS.get(label)
+        ax.bar(positions, bar_values, width, label=label, color=color, alpha=0.86)
+        for xpos, value in zip(positions, bar_values):
+            ax.text(xpos, value + 0.018, f"{value * 100:.1f}%", ha="center", va="bottom", fontsize=8)
+
+    ax.set_ylim(0.0, 1.08)
+    ax.set_ylabel("Rate / confidence")
+    ax.set_title("Identity leakage metrics on reconstructed signals")
+    ax.set_xticks(x)
+    ax.set_xticklabels([name for name, _ in metrics])
+    ax.grid(axis="y", alpha=0.22)
+    ax.legend(frameon=False, loc="upper right")
+    fig.tight_layout()
+    path = out_dir / "dlg_identity_metrics.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
+
+def save_user_prediction_distribution(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
+    fig, axes = plt.subplots(1, 2, figsize=(12.4, 4.8))
+    users = sorted(
+        {
+            int(row["user"])
+            for rows in series_rows.values()
+            for row in rows
+            if row.get("user") is not None
+        }
+        | {
+            int(str(row["recon_topk_users"]).split("|")[0])
+            for rows in series_rows.values()
+            for row in rows
+            if row.get("recon_topk_users") not in (None, "")
+        }
+    )
+    if not users:
+        users = list(range(8))
+    x = np.arange(len(users))
+    width = min(0.34, 0.78 / max(len(series_rows), 1))
+
+    for idx, (label, rows) in enumerate(series_rows.items()):
+        counts = np.zeros(len(users), dtype=float)
+        user_to_pos = {user: pos for pos, user in enumerate(users)}
+        for row in rows:
+            top_user = str(row.get("recon_topk_users", "")).split("|")[0]
+            if top_user == "":
+                continue
+            counts[user_to_pos[int(top_user)]] += 1
+        positions = x + (idx - (len(series_rows) - 1) / 2.0) * width
+        axes[0].bar(positions, counts, width=width, label=label, color=COLORS.get(label), alpha=0.84)
+        for xpos, count in zip(positions, counts):
+            if count:
+                axes[0].text(xpos, count + 1.0, f"{int(count)}", ha="center", va="bottom", fontsize=8)
+
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels([f"user {user}" for user in users], rotation=35, ha="right")
+    axes[0].set_ylabel("Top-1 prediction count")
+    axes[0].set_title("Predicted identity from reconstructions")
+    axes[0].grid(axis="y", alpha=0.22)
+    axes[0].legend(frameon=False)
+
+    bins = np.linspace(0.0, 1.0, 31)
+    for label, rows in series_rows.items():
+        conf = values(rows, "recon_true_user_conf")
+        axes[1].hist(conf, bins=bins, alpha=0.45, color=COLORS.get(label), label=label)
+        axes[1].axvline(float(np.mean(conf)), color=COLORS.get(label), linewidth=2.0)
+    axes[1].set_xlabel("Recon true-user confidence")
+    axes[1].set_ylabel("Sample count")
+    axes[1].set_title("Confidence assigned to the true user")
+    axes[1].grid(axis="y", alpha=0.22)
+    axes[1].legend(frameon=False)
+
+    fig.tight_layout()
+    path = out_dir / "dlg_user_prediction_distribution.png"
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return path
@@ -239,7 +340,12 @@ def summarize(series_rows: Dict[str, List[Dict]], figures: Dict[str, str]) -> Di
             "recon_user_top1_acc": mean(values(rows, "recon_user_top1_acc")),
             "recon_user_top3_acc": mean(values(rows, "recon_user_top3_acc")),
             "recon_true_user_conf": mean(values(rows, "recon_true_user_conf")),
+            "real_user_top1_acc": mean(values(rows, "real_user_top1_acc")),
+            "real_user_top3_acc": mean(values(rows, "real_user_top3_acc")),
+            "real_true_user_conf": mean(values(rows, "real_true_user_conf")),
+            "idlg_label_acc": mean(values(rows, "label_correct")),
             "recon_task_acc": mean(values(rows, "recon_task_acc")),
+            "real_task_acc": mean(values(rows, "real_task_acc")),
         }
         if any(row.get("mse_to_clean") is not None for row in rows):
             summary["series"][label]["mean_mse_to_clean"] = mean(values(rows, "mse_to_clean"))
@@ -263,7 +369,12 @@ def save_summary_csv(summary: Dict, out_dir: Path) -> Path:
         "recon_user_top1_acc",
         "recon_user_top3_acc",
         "recon_true_user_conf",
+        "real_user_top1_acc",
+        "real_user_top3_acc",
+        "real_true_user_conf",
+        "idlg_label_acc",
         "recon_task_acc",
+        "real_task_acc",
     ]
     path = out_dir / "dlg_noise_comparison_summary.csv"
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -291,6 +402,8 @@ def main() -> None:
     figures = {
         "quality_trends": str(save_quality_trends(series_rows, out_dir)),
         "metric_bars": str(save_metric_bars(series_rows, out_dir)),
+        "identity_metrics": str(save_identity_metrics(series_rows, out_dir)),
+        "user_prediction_distribution": str(save_user_prediction_distribution(series_rows, out_dir)),
         "distributions": str(save_distributions(series_rows, out_dir)),
     }
     summary = summarize(series_rows, figures)

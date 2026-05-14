@@ -17,8 +17,6 @@ EUCLIDEAN_ALIGN=${EUCLIDEAN_ALIGN:-1}
 TASK_BALANCED_SAMPLER=${TASK_BALANCED_SAMPLER:-1}
 HOLDOUT_SESSION=${HOLDOUT_SESSION:-4}
 RUN_NAME=${RUN_NAME:-p300_eegnet_channel_leave_session_${HOLDOUT_SESSION}}
-EPSILON=${EPSILON:-0}
-GRADIENT_LAPLACE_SENSITIVITY=${GRADIENT_LAPLACE_SENSITIVITY:-${TRIAL_LAPLACE_SENSITIVITY:-1.0}}
 
 EXTRA_ARGS=()
 if [[ "$EUCLIDEAN_ALIGN" == "1" || "$EUCLIDEAN_ALIGN" == "true" ]]; then
@@ -27,16 +25,11 @@ fi
 if [[ "$TASK_BALANCED_SAMPLER" == "1" || "$TASK_BALANCED_SAMPLER" == "true" ]]; then
   EXTRA_ARGS+=(--task_balanced_sampler)
 fi
-if [[ "$EPSILON" != "0" && "$EPSILON" != "0.0" && -n "$EPSILON" ]]; then
-  EXTRA_ARGS+=(--gradient_laplace_epsilon "$EPSILON")
-  EXTRA_ARGS+=(--gradient_laplace_sensitivity "$GRADIENT_LAPLACE_SENSITIVITY")
-fi
 
 echo
 echo "================================================================================"
 echo "[run_leave1] dataset=${DATASET} model=${MODEL} holdout_session=${HOLDOUT_SESSION}"
 echo "[run_leave1] task_epochs=${TASK_EPOCHS} user_epochs=${USER_EPOCHS} seeds=${SEEDS}"
-echo "[run_leave1] gradient_laplace_epsilon=${EPSILON} sensitivity=${GRADIENT_LAPLACE_SENSITIVITY}"
 echo "[run_leave1] run_name=${RUN_NAME}"
 echo "================================================================================"
 

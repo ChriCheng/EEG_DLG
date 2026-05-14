@@ -11,14 +11,30 @@ EUCLIDEAN_ALIGN=${EUCLIDEAN_ALIGN:-1}
 DEVICE=${DEVICE:-auto}
 
 SEED=${SEED:-0}
-TRAIN_SESSION=${TRAIN_SESSION:-3}
-CHECKPOINT=${CHECKPOINT:-checkpoint/checkpoints_2stage_EEGNet/p300_eegnet_channel/seed_${SEED}_train_session_${TRAIN_SESSION}/best_user_by_acc.pth}
+EVAL_SESSION=${EVAL_SESSION:-}
+if [[ -z "${TRAIN_SESSION:-}" ]]; then
+  if [[ -n "$EVAL_SESSION" ]]; then
+    TRAIN_SESSION=2
+  else
+    TRAIN_SESSION=3
+  fi
+fi
+if [[ -z "${RUN_NAME:-}" ]]; then
+  if [[ -n "$EVAL_SESSION" ]]; then
+    RUN_NAME="p300_eegnet_channel_leave_session_${EVAL_SESSION}"
+  else
+    RUN_NAME="p300_eegnet_channel"
+  fi
+fi
+FOLD_NAME=${FOLD_NAME:-seed_${SEED}_train_session_${TRAIN_SESSION}${EVAL_SESSION:+_holdout_session_${EVAL_SESSION}}}
 
 BATCH_SIZE=${BATCH_SIZE:-1}
 INDICES=${INDICES:-}
 SPLIT=${SPLIT:-test}
-EVAL_SESSION=${EVAL_SESSION:-}
 ATTACK_HEAD=${ATTACK_HEAD:-task}
+if [[ -z "${CHECKPOINT:-}" ]]; then
+  CHECKPOINT=checkpoint/checkpoints_2stage_${MODEL}/${RUN_NAME}/${FOLD_NAME}/best_user_by_acc.pth
+fi
 LABEL_MODE=${LABEL_MODE:-idlg}
 ITERS=${ITERS:-30}
 LR=${LR:-1.0}

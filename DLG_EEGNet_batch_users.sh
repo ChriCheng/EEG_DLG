@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# MAX_TRIALS=400 EPSILON=0 nohup bash ./DLG_EEGNet_batch_users.sh &> logs/batchiDLG400_ep0.log &
+# MAX_TRIALS=400 EPSILON=10 nohup bash ./DLG_EEGNet_batch_users.sh &> logs/batchiDLG400_ep10.log &
+
 set -euo pipefail
 
 PYTHON=${PYTHON:-/home/ubuntu/miniconda3/envs/PP310/bin/python}
@@ -11,9 +14,15 @@ EUCLIDEAN_ALIGN=${EUCLIDEAN_ALIGN:-1}
 DEVICE=${DEVICE:-auto}
 
 SEED=${SEED:-0}
-TRAIN_SESSION=${TRAIN_SESSION:-3}
 SPLIT=${SPLIT:-test}
-EVAL_SESSION=${EVAL_SESSION:-}
+EVAL_SESSION=${EVAL_SESSION:-4}
+if [[ -z "${TRAIN_SESSION:-}" ]]; then
+  if [[ -n "$EVAL_SESSION" ]]; then
+    TRAIN_SESSION=2
+  else
+    TRAIN_SESSION=3
+  fi
+fi
 SELECTION=${SELECTION:-all}
 if [[ -z "${RUN_NAME:-}" ]]; then
   if [[ -n "$EVAL_SESSION" ]]; then
@@ -23,8 +32,10 @@ if [[ -z "${RUN_NAME:-}" ]]; then
   fi
 fi
 FOLD_NAME=${FOLD_NAME:-seed_${SEED}_train_session_${TRAIN_SESSION}${EVAL_SESSION:+_holdout_session_${EVAL_SESSION}}}
-CHECKPOINT=${CHECKPOINT:-checkpoint/checkpoints_2stage_${MODEL}/${RUN_NAME}/${FOLD_NAME}/best_user_by_acc.pth}
 ATTACK_HEAD=${ATTACK_HEAD:-task}
+if [[ -z "${CHECKPOINT:-}" ]]; then
+  CHECKPOINT=checkpoint/checkpoints_2stage_${MODEL}/${RUN_NAME}/${FOLD_NAME}/best_user_by_acc.pth
+fi
 LABEL_MODE=${LABEL_MODE:-idlg}
 ITERS=${ITERS:-33}
 LR=${LR:-1.0}
@@ -33,7 +44,7 @@ LOG_EVERY=${LOG_EVERY:-3}
 TOPK=${TOPK:-3}
 SKIP_FIGURES=${SKIP_FIGURES:-1}
 KEEP_TRIAL_ARTIFACTS=${KEEP_TRIAL_ARTIFACTS:-0}
-MAX_TRIALS=${MAX_TRIALS:-0}
+MAX_TRIALS=${MAX_TRIALS:-200}
 START_OFFSET=${START_OFFSET:-0}
 EPSILON=${EPSILON:-0}
 TRIAL_LAPLACE_SENSITIVITY=${TRIAL_LAPLACE_SENSITIVITY:-1.0}
