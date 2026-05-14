@@ -22,7 +22,7 @@ base_dir="checkpoint/dlg_attack_batch"
 # ==============================================================================
 none_noise_path="P300_EEGNet_task_idlg_seed0_train2_eval4_balanced_per_user_eps0_sens1p0"
 noise_path="P300_EEGNet_task_idlg_seed0_train2_eval4_balanced_per_user_eps10_sens1p0"
-out_name="compare_user_eval4_eps0_vs_eps10"
+out_name="compare_user_eval4_eps0_vs_eps10_400iters"
 none_noise_label="None noise"
 noise_label="Add noise"
 

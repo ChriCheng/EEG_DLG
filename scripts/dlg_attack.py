@@ -19,6 +19,22 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
 
+class LinearEEGModel(nn.Module):
+    def __init__(self, n_channels: int, n_times: int, n_task_classes: int, n_users: int):
+        super().__init__()
+        input_dim = n_channels * n_times
+        self.task_head = nn.Linear(input_dim, n_task_classes)
+        self.user_head = nn.Linear(input_dim, n_users)
+
+    def forward(self, x: torch.Tensor, head: str = "task") -> torch.Tensor:
+        flat = x.reshape(x.shape[0], -1)
+        if head == "task":
+            return self.task_head(flat)
+        if head == "user":
+            return self.user_head(flat)
+        raise ValueError(f"Unknown head={head!r}")
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -70,6 +86,46 @@ def load_checkpoint_model(
     model.to(device)
     model.eval()
     return model, checkpoint
+
+
+def build_random_init_model(
+    ds,
+    model_name: str,
+    user_hidden_dim: int,
+    user_dropout: float,
+    device: torch.device,
+) -> Tuple[nn.Module, Dict]:
+    if model_name == "Linear":
+        cfg = {
+            "n_channels": ds.n_channels,
+            "n_times": ds.n_times,
+            "n_task_classes": ds.n_task_classes,
+            "n_users": ds.n_users,
+        }
+        model = LinearEEGModel(
+            n_channels=ds.n_channels,
+            n_times=ds.n_times,
+            n_task_classes=ds.n_task_classes,
+            n_users=ds.n_users,
+        )
+    else:
+        model, cfg = build_model(
+            ds,
+            user_hidden_dim=user_hidden_dim,
+            model_name=model_name,
+            user_dropout=user_dropout,
+        )
+    model.to(device)
+    model.eval()
+    return model, {
+        "epoch": 0,
+        "model_config": cfg,
+        "extra": {
+            "stage": "random_init",
+            "dataset_type": getattr(ds, "dataset_name", None),
+            "model_name": model_name,
+        },
+    }
 
 
 def soft_cross_entropy(logits: torch.Tensor, target_probs: torch.Tensor) -> torch.Tensor:
@@ -140,6 +196,17 @@ def gradient_distance(
     if grad_diff is None:
         raise ValueError("No overlapping gradients were available for DLG matching")
     return grad_diff
+
+
+def resolve_dummy_init_scale(value: str | float, reference_x: torch.Tensor) -> Tuple[float, str]:
+    raw = str(value).strip().lower()
+    if raw == "auto":
+        scale = float(reference_x.detach().std().item())
+        return max(scale, 1e-12), "auto"
+    scale = float(value)
+    if scale <= 0:
+        raise ValueError("--dummy_init_scale must be > 0 or 'auto'")
+    return scale, "fixed"
 
 
 def pearson_corr(x: torch.Tensor, y: torch.Tensor) -> float:
@@ -378,6 +445,10 @@ def format_summary_text(summary: Dict) -> str:
         f"attack_head      : {summary['attack_head']} (gradient/iDLG reconstruction)",
         "eval_heads       : task metrics use task_head; UIA metrics use user_head",
         f"label_mode       : {summary['label_info']['label_mode']}",
+        f"dummy_init_scale : {summary['dummy_init_scale']} ({summary['dummy_init_mode']})",
+        f"grad_loss_scale  : {summary['grad_loss_scale']}",
+        f"target_stats     : {summary['target_input_stats']}",
+        f"real_task_eval   : {summary['real_task_eval']}",
         f"batch_indices    : {summary['batch_indices']}",
         f"y_task           : {summary['y_task']}",
         f"y_user           : {summary['y_user']}",
@@ -538,9 +609,10 @@ def save_waveform_trajectory(
 
 def run_dlg(args: argparse.Namespace) -> Dict:
     set_seed(args.seed)
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device)
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
 
     ds = build_dataset(
         dataset_name=args.dataset,
@@ -549,14 +621,25 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         euclidean_align=args.euclidean_align,
     )
 
-    model, checkpoint = load_checkpoint_model(
-        checkpoint_path=Path(args.checkpoint),
-        ds=ds,
-        model_name=args.model,
-        user_hidden_dim=args.user_hidden_dim,
-        user_dropout=args.user_dropout,
-        device=device,
-    )
+    if args.random_init_model:
+        model, checkpoint = build_random_init_model(
+            ds=ds,
+            model_name=args.model,
+            user_hidden_dim=args.user_hidden_dim,
+            user_dropout=args.user_dropout,
+            device=device,
+        )
+    else:
+        if not args.checkpoint:
+            raise ValueError("--checkpoint is required unless --random_init_model is set")
+        model, checkpoint = load_checkpoint_model(
+            checkpoint_path=Path(args.checkpoint),
+            ds=ds,
+            model_name=args.model,
+            user_hidden_dim=args.user_hidden_dim,
+            user_dropout=args.user_dropout,
+            device=device,
+        )
 
     ckpt_extra = checkpoint.get("extra", {})
     train_session_internal = args.train_session_internal
@@ -641,15 +724,23 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         dummy_y = None
         dummy_label_logits = torch.randn(x.shape[0], num_classes, device=device, requires_grad=True)
 
-    dummy_x = torch.randn_like(x, requires_grad=True)
+    dummy_init_scale, dummy_init_mode = resolve_dummy_init_scale(
+        getattr(args, "dummy_init_scale", 1.0),
+        x,
+    )
+    grad_loss_scale = float(getattr(args, "grad_loss_scale", 1.0))
+    if grad_loss_scale <= 0:
+        raise ValueError("--grad_loss_scale must be > 0")
+    dummy_x = (torch.randn_like(x) * dummy_init_scale).requires_grad_(True)
     opt_params = [dummy_x] if dummy_label_logits is None else [dummy_x, dummy_label_logits]
 
     if args.optimizer == "lbfgs":
+        line_search_fn = None if args.lbfgs_line_search == "none" else args.lbfgs_line_search
         optimizer = torch.optim.LBFGS(
             opt_params,
             lr=args.lr,
-            max_iter=20,
-            line_search_fn="strong_wolfe",
+            max_iter=args.lbfgs_max_iter,
+            line_search_fn=line_search_fn,
         )
     else:
         optimizer = torch.optim.Adam(opt_params, lr=args.lr)
@@ -675,7 +766,7 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             params = [p for _, p in named_params]
             dummy_grads = torch.autograd.grad(loss, params, create_graph=True, allow_unused=True)
             grad_loss = gradient_distance(dummy_grads, target_grads)
-            grad_loss.backward()
+            (grad_loss * grad_loss_scale).backward()
             return grad_loss
 
         if args.optimizer == "lbfgs":
@@ -683,6 +774,12 @@ def run_dlg(args: argparse.Namespace) -> Dict:
         else:
             grad_loss = closure()
             optimizer.step()
+
+        if not torch.isfinite(grad_loss).all() or not torch.isfinite(dummy_x).all():
+            raise FloatingPointError(
+                "DLG optimization produced NaN/Inf. Try a smaller --lr, "
+                "--optimizer adam, or a smaller --dummy_init_scale."
+            )
 
         if it % args.log_every == 0 or it == args.iters:
             with torch.no_grad():
@@ -704,8 +801,8 @@ def run_dlg(args: argparse.Namespace) -> Dict:
                         }
                     )
                 print(
-                    f"[DLG] iter={it:04d} grad_loss={grad_loss.item():.6f} "
-                    f"mse={mse:.6f} corr={corr:.4f}"
+                    f"[DLG] iter={it:04d} grad_loss={grad_loss.item():.6e} "
+                    f"mse={mse:.6e} corr={corr:.4f}"
                 )
 
     recon = dummy_x.detach()
@@ -719,6 +816,11 @@ def run_dlg(args: argparse.Namespace) -> Dict:
     metrics["recon"]["task_acc"] = task_accuracy(model, recon, y_task)
     metrics["real"]["task_acc"] = task_accuracy(model, x, y_task)
     metrics["noise"]["task_acc"] = task_accuracy(model, noise, y_task)
+    with torch.no_grad():
+        real_task_logits = head_logits(model, x, head="task")
+        real_task_probs = F.softmax(real_task_logits, dim=1)
+        real_task_loss = F.cross_entropy(real_task_logits, y_task)
+        real_task_pred = real_task_probs.argmax(dim=1)
 
     label_info = {
         "attack_labels": attack_labels.detach().cpu().tolist(),
@@ -732,10 +834,27 @@ def run_dlg(args: argparse.Namespace) -> Dict:
     summary = {
         "dataset": args.dataset,
         "model": args.model,
-        "checkpoint": str(args.checkpoint),
+        "checkpoint": None if args.random_init_model else str(args.checkpoint),
+        "random_init_model": bool(args.random_init_model),
         "checkpoint_epoch": checkpoint.get("epoch"),
         "checkpoint_extra": ckpt_extra,
         "attack_head": args.attack_head,
+        "dummy_init_scale": dummy_init_scale,
+        "dummy_init_mode": dummy_init_mode,
+        "grad_loss_scale": grad_loss_scale,
+        "target_input_stats": {
+            "min": float(x.min().item()),
+            "max": float(x.max().item()),
+            "mean": float(x.mean().item()),
+            "std": float(x.std().item()),
+        },
+        "real_task_eval": {
+            "loss": float(real_task_loss.item()),
+            "pred": real_task_pred.detach().cpu().tolist(),
+            "true_conf": real_task_probs.gather(1, y_task.view(-1, 1)).squeeze(1).detach().cpu().tolist(),
+            "correct": (real_task_pred == y_task).detach().cpu().tolist(),
+            "logits": real_task_logits.detach().cpu().tolist(),
+        },
         "batch_indices": batch_indices,
         "train_session_internal": train_session_internal,
         "eval_session_internal": eval_session_internal,
@@ -842,11 +961,16 @@ def run_dlg(args: argparse.Namespace) -> Dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Simple DLG/iDLG attack for EEG checkpoints")
-    parser.add_argument("--checkpoint", type=str, required=True)
+    parser = argparse.ArgumentParser(description="Simple DLG/iDLG attack for EEG checkpoints or a shared initialized model")
+    parser.add_argument("--checkpoint", type=str, default="")
+    parser.add_argument(
+        "--random_init_model",
+        action="store_true",
+        help="Use a seeded randomly initialized model instead of loading --checkpoint.",
+    )
     parser.add_argument("--dataset", type=str, default="P300")
     parser.add_argument("--data_dir", type=str, default="data/P300")
-    parser.add_argument("--model", type=str, default="EEGNet", choices=["EEGNet", "LMEEGNet", "ShallowCNN"])
+    parser.add_argument("--model", type=str, default="EEGNet", choices=["EEGNet", "LMEEGNet", "ShallowCNN", "Linear"])
     parser.add_argument("--normalize", type=str, default="channel", choices=["none", "trial", "channel"])
     parser.add_argument("--euclidean_align", action="store_true")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
@@ -881,8 +1005,17 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1.0)
     parser.add_argument("--optimizer", type=str, default="lbfgs", choices=["lbfgs", "adam"])
+    parser.add_argument("--lbfgs_max_iter", type=int, default=20)
+    parser.add_argument("--lbfgs_line_search", type=str, default="strong_wolfe", choices=["none", "strong_wolfe"])
+    parser.add_argument("--grad_loss_scale", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument(
+        "--dummy_init_scale",
+        type=str,
+        default="1.0",
+        help="Standard deviation used to initialize the dummy EEG tensor, or 'auto' to use the target sample std.",
+    )
     parser.add_argument(
         "--trial_laplace_epsilon",
         type=float,

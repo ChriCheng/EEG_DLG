@@ -16,7 +16,7 @@ from matplotlib import pyplot as plt
 
 DEFAULT_SERIES = [
     (
-        "No noise first 200",
+        "No noise",
         "checkpoint/dlg_attack_batch/P300_EEGNet_task_idlg_seed0_train3_eval4_all/batch_metrics.csv",
     ),
     (
@@ -64,14 +64,15 @@ INT_FIELDS = {
 }
 
 COLORS = {
-    "No noise first 200": "#2f6f3e",
+    "No noise": "#2f6f3e",
     "DLG_1 eps=1.0": "#4c78a8",
     "DLG_01 eps=0.1": "#d95f02",
 }
+FALLBACK_COLORS = ["#4c78a8", "#d95f02", "#2f6f3e", "#e45756", "#72b7b2", "#b279a2"]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare DLG noisy runs with the first 200 no-noise samples.")
+    parser = argparse.ArgumentParser(description="Compare DLG noisy runs from one or more batch metric CSV files.")
     parser.add_argument("--out_dir", default="checkpoint/dlg_attack_batch/noise_comparison_figures")
     parser.add_argument(
         "--series",
@@ -111,7 +112,18 @@ def load_rows(path: Path) -> List[Dict]:
             row = {key: maybe_number(raw, key) for key in raw}
             rows.append(row)
     rows.sort(key=lambda item: item["trial_index"])
-    return rows[:200]
+    return rows
+
+
+def sample_count_label(series_rows: Dict[str, List[Dict]]) -> str:
+    counts = sorted({len(rows) for rows in series_rows.values()})
+    if len(counts) == 1:
+        return f"{counts[0]} samples"
+    return " / ".join(str(count) for count in counts) + " samples"
+
+
+def series_color(label: str, index: int) -> str:
+    return COLORS.get(label, FALLBACK_COLORS[index % len(FALLBACK_COLORS)])
 
 
 def rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
@@ -132,9 +144,9 @@ def save_quality_trends(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Pa
     fig, axes = plt.subplots(2, 1, figsize=(12.0, 7.2), sharex=True)
     window = 15
 
-    for label, rows in series_rows.items():
+    for idx, (label, rows) in enumerate(series_rows.items()):
         x = np.arange(1, len(rows) + 1)
-        color = COLORS.get(label)
+        color = series_color(label, idx)
         mse = values(rows, "mse")
         corr = values(rows, "corr")
         axes[0].plot(x, mse, linewidth=0.8, alpha=0.22, color=color)
@@ -144,13 +156,13 @@ def save_quality_trends(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Pa
 
     axes[0].set_yscale("log")
     axes[0].set_ylabel("MSE (log scale)")
-    axes[0].set_title("Reconstruction error over the first 200 samples")
+    axes[0].set_title(f"Reconstruction error over {sample_count_label(series_rows)}")
     axes[0].grid(alpha=0.22)
     axes[0].legend(frameon=False, loc="upper left")
 
     axes[1].set_xlabel("Sample number")
     axes[1].set_ylabel("Correlation")
-    axes[1].set_title("Reconstruction correlation over the first 200 samples")
+    axes[1].set_title(f"Reconstruction correlation over {sample_count_label(series_rows)}")
     axes[1].grid(alpha=0.22)
     axes[1].legend(frameon=False, loc="lower left")
 
@@ -166,9 +178,9 @@ def save_metric_bars(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
     metrics = [
         ("MSE", "mse", True),
         ("Corr", "corr", False),
-        ("Recon UIA@1", "recon_user_top1_acc", False),
-        ("Recon UIA@3", "recon_user_top3_acc", False),
-        ("Real UIA@1", "real_user_top1_acc", False),
+        ("Recon UIA 1", "recon_user_top1_acc", False),
+        ("Recon UIA 3", "recon_user_top3_acc", False),
+        ("Real UIA 1", "real_user_top1_acc", False),
         ("True-user Conf", "recon_true_user_conf", False),
     ]
     labels = list(series_rows)
@@ -180,14 +192,14 @@ def save_metric_bars(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
         rows = series_rows[label]
         bar_values = [mean(values(rows, key)) for _, key, _ in metrics]
         positions = x + (idx - (len(labels) - 1) / 2.0) * width
-        ax.bar(positions, bar_values, width, label=label, color=COLORS.get(label))
+        ax.bar(positions, bar_values, width, label=label, color=series_color(label, idx))
         for xpos, value in zip(positions, bar_values):
             text = f"{value:.3f}" if value < 10 else f"{value:.1f}"
             ax.text(xpos, value * 1.05 if value > 0 else 0.015, text, ha="center", va="bottom", fontsize=8)
 
     ax.set_yscale("symlog", linthresh=1.0)
     ax.set_ylabel("Mean value (symlog scale)")
-    ax.set_title("Mean metrics over 200 samples")
+    ax.set_title(f"Mean metrics over {sample_count_label(series_rows)}")
     ax.set_xticks(x)
     ax.set_xticklabels([name for name, _, _ in metrics])
     ax.grid(axis="y", alpha=0.22)
@@ -217,7 +229,7 @@ def save_identity_metrics(series_rows: Dict[str, List[Dict]], out_dir: Path) -> 
         rows = series_rows[label]
         bar_values = [mean(values(rows, key)) for _, key in metrics]
         positions = x + (idx - (len(labels) - 1) / 2.0) * width
-        color = COLORS.get(label)
+        color = series_color(label, idx)
         ax.bar(positions, bar_values, width, label=label, color=color, alpha=0.86)
         for xpos, value in zip(positions, bar_values):
             ax.text(xpos, value + 0.018, f"{value * 100:.1f}%", ha="center", va="bottom", fontsize=8)
@@ -237,7 +249,7 @@ def save_identity_metrics(series_rows: Dict[str, List[Dict]], out_dir: Path) -> 
 
 
 def save_user_prediction_distribution(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
-    fig, axes = plt.subplots(1, 2, figsize=(12.4, 4.8))
+    fig, axes = plt.subplots(1, 2, figsize=(13.6, 4.8))
     users = sorted(
         {
             int(row["user"])
@@ -255,34 +267,63 @@ def save_user_prediction_distribution(series_rows: Dict[str, List[Dict]], out_di
     if not users:
         users = list(range(8))
     x = np.arange(len(users))
-    width = min(0.34, 0.78 / max(len(series_rows), 1))
+    width = min(0.18, 0.78 / max(len(series_rows) + 1, 1))
+    user_to_pos = {user: pos for pos, user in enumerate(users)}
+    true_counts = np.zeros(len(users), dtype=float)
+    first_rows = next(iter(series_rows.values()), [])
+    for row in first_rows:
+        true_user = row.get("user")
+        if true_user is not None:
+            true_counts[user_to_pos[int(true_user)]] += 1
+
+    true_positions = x - (len(series_rows) / 2.0) * width
+    axes[0].bar(
+        true_positions,
+        true_counts,
+        width=width,
+        label="True",
+        color="#6b7280",
+        alpha=0.34,
+        edgecolor="#374151",
+        hatch="//",
+    )
+    for xpos, count in zip(true_positions, true_counts):
+        if count:
+            axes[0].text(xpos, count + 1.0, f"{int(count)}", ha="center", va="bottom", fontsize=8)
 
     for idx, (label, rows) in enumerate(series_rows.items()):
-        counts = np.zeros(len(users), dtype=float)
-        user_to_pos = {user: pos for pos, user in enumerate(users)}
+        pred_counts = np.zeros(len(users), dtype=float)
         for row in rows:
             top_user = str(row.get("recon_topk_users", "")).split("|")[0]
-            if top_user == "":
-                continue
-            counts[user_to_pos[int(top_user)]] += 1
-        positions = x + (idx - (len(series_rows) - 1) / 2.0) * width
-        axes[0].bar(positions, counts, width=width, label=label, color=COLORS.get(label), alpha=0.84)
-        for xpos, count in zip(positions, counts):
+            if top_user != "":
+                pred_counts[user_to_pos[int(top_user)]] += 1
+        pred_positions = x + (idx + 1 - len(series_rows) / 2.0) * width
+        color = series_color(label, idx)
+        axes[0].bar(
+            pred_positions,
+            pred_counts,
+            width=width,
+            label=label,
+            color=color,
+            alpha=0.84,
+        )
+        for xpos, count in zip(pred_positions, pred_counts):
             if count:
                 axes[0].text(xpos, count + 1.0, f"{int(count)}", ha="center", va="bottom", fontsize=8)
 
     axes[0].set_xticks(x)
-    axes[0].set_xticklabels([f"user {user}" for user in users], rotation=35, ha="right")
-    axes[0].set_ylabel("Top-1 prediction count")
-    axes[0].set_title("Predicted identity from reconstructions")
+    axes[0].set_xticklabels([f"user {user}" for user in users], rotation=0, ha="center")
+    axes[0].set_ylabel("Sample count")
+    axes[0].set_title("True vs predicted identity counts")
     axes[0].grid(axis="y", alpha=0.22)
-    axes[0].legend(frameon=False)
+    axes[0].legend(frameon=False, fontsize=8)
 
     bins = np.linspace(0.0, 1.0, 31)
-    for label, rows in series_rows.items():
+    for idx, (label, rows) in enumerate(series_rows.items()):
         conf = values(rows, "recon_true_user_conf")
-        axes[1].hist(conf, bins=bins, alpha=0.45, color=COLORS.get(label), label=label)
-        axes[1].axvline(float(np.mean(conf)), color=COLORS.get(label), linewidth=2.0)
+        color = series_color(label, idx)
+        axes[1].hist(conf, bins=bins, alpha=0.45, color=color, label=label)
+        axes[1].axvline(float(np.mean(conf)), color=color, linewidth=2.0)
     axes[1].set_xlabel("Recon true-user confidence")
     axes[1].set_ylabel("Sample count")
     axes[1].set_title("Confidence assigned to the true user")
@@ -299,8 +340,8 @@ def save_user_prediction_distribution(series_rows: Dict[str, List[Dict]], out_di
 def save_distributions(series_rows: Dict[str, List[Dict]], out_dir: Path) -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.8))
 
-    for label, rows in series_rows.items():
-        color = COLORS.get(label)
+    for idx, (label, rows) in enumerate(series_rows.items()):
+        color = series_color(label, idx)
         axes[0].hist(values(rows, "corr"), bins=np.linspace(0.0, 1.0, 31), alpha=0.45, color=color, label=label)
         mse = np.maximum(values(rows, "mse"), 1e-12)
         axes[1].hist(np.log10(mse), bins=30, alpha=0.45, color=color, label=label)
