@@ -17,6 +17,7 @@ from scripts.train import build_dataset, build_loso_split, build_model
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
+from matplotlib.ticker import FixedLocator, MaxNLocator
 
 
 class LinearEEGModel(nn.Module):
@@ -539,6 +540,24 @@ def waveform_ylim(target: np.ndarray, recons: List[np.ndarray]) -> Tuple[float, 
     return y_min - pad, y_max + pad
 
 
+def parse_float_list(value: str) -> List[float]:
+    if not value:
+        return []
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def hide_waveform_yticks(ax, hidden_yticks: List[float]) -> None:
+    if not hidden_yticks:
+        return
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ticks = [
+        float(tick)
+        for tick in ax.get_yticks()
+        if not any(math.isclose(float(tick), hidden, rel_tol=1e-9, abs_tol=1e-9) for hidden in hidden_yticks)
+    ]
+    ax.yaxis.set_major_locator(FixedLocator(ticks))
+
+
 def save_waveform_trajectory(
     real_x: torch.Tensor,
     clean_x: torch.Tensor,
@@ -548,6 +567,7 @@ def save_waveform_trajectory(
     sfreq: float,
     show_grid: bool,
     font_size: float,
+    hidden_yticks: List[float],
 ) -> Tuple[int, List[str]]:
     channel = choose_plot_channel(clean_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
@@ -563,7 +583,8 @@ def save_waveform_trajectory(
         ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
         ax.set_ylim(*y_limits)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
-        ax.set_ylabel("Amplitude (μV)", fontsize=font_size)
+        ax.set_ylabel("Amplitude (mV)", fontsize=font_size)
+        hide_waveform_yticks(ax, hidden_yticks)
         ax.tick_params(axis="both", labelsize=font_size)
         legend = ax.legend(
             fontsize=max(font_size - 1.0, 6.0),
@@ -583,7 +604,8 @@ def save_waveform_trajectory(
         panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
         panel_ax.set_ylim(*y_limits)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
-        panel_ax.set_ylabel("Amplitude (μV)", fontsize=font_size)
+        panel_ax.set_ylabel("Amplitude (mV)", fontsize=font_size)
+        hide_waveform_yticks(panel_ax, hidden_yticks)
         panel_ax.tick_params(axis="both", labelsize=font_size)
         legend = panel_ax.legend(
             fontsize=max(font_size - 1.0, 6.0),
@@ -920,11 +942,13 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             sfreq=args.sfreq,
             show_grid=args.waveform_grid,
             font_size=args.waveform_font_size,
+            hidden_yticks=parse_float_list(args.waveform_hide_yticks),
         )
         summary["visualization"] = {
             "plot_channel": plot_channel,
             "waveform_grid": args.waveform_grid,
             "waveform_font_size": args.waveform_font_size,
+            "waveform_hide_yticks": parse_float_list(args.waveform_hide_yticks),
             "waveform_trajectory_png": str(waveform_path),
             "waveform_panel_pngs": panel_paths,
         }
@@ -1049,6 +1073,12 @@ def main() -> None:
         type=float,
         default=10.0,
         help="Font size for waveform axis labels and tick labels.",
+    )
+    parser.add_argument(
+        "--waveform_hide_yticks",
+        type=str,
+        default="",
+        help="Comma-separated y tick labels to hide on waveform plots, e.g. '4' or '-4,4'.",
     )
     parser.add_argument("--out_dir", type=str, default="checkpoint/dlg_attack")
     parser.add_argument(

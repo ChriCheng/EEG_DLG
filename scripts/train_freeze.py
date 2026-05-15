@@ -188,7 +188,7 @@ def build_dataset(
 ) -> Dataset:
     dataset_name = dataset_name.strip()
 
-    if dataset_name in {"MI1", "P300"}:
+    if dataset_name in {"MI1", "MI2", "MI2_DLG", "P300"}:
         return MI1Dataset(
             data_dir,
             normalize=normalize,
@@ -197,7 +197,7 @@ def build_dataset(
 
     raise NotImplementedError(
         f"Dataset {dataset_name!r} is not implemented yet. "
-        f"Currently supported: ['MI1', 'P300']"
+        f"Currently supported: ['MI1', 'MI2', 'MI2_DLG', 'P300']"
     )
 
 

@@ -187,7 +187,7 @@ def build_dataset(
 ) -> Dataset:
     dataset_name = dataset_name.strip()
 
-    if dataset_name in {"MI1", "P300"}:
+    if dataset_name in {"MI1", "MI2", "MI2_DLG", "P300"}:
         return MI1Dataset(
             data_dir,
             normalize=normalize,
@@ -196,7 +196,7 @@ def build_dataset(
 
     raise NotImplementedError(
         f"Dataset {dataset_name!r} is not implemented yet. "
-        f"Currently supported: ['MI1', 'P300']"
+        f"Currently supported: ['MI1', 'MI2', 'MI2_DLG', 'P300']"
     )
 
 
@@ -205,6 +205,7 @@ def build_model(
     user_hidden_dim: int,
     model_name: str,
     user_dropout: float = 0.5,
+    eegnet_overrides: Dict[str, Any] | None = None,
 ) -> Tuple[nn.Module, Any]:
     model_name = model_name.strip()
 
@@ -213,6 +214,10 @@ def build_model(
             n_channels=ds.n_channels,
             n_times=ds.n_times,
         )
+        if eegnet_overrides:
+            for key, value in eegnet_overrides.items():
+                if value is not None:
+                    setattr(cfg, key, value)
         model = EEGNetMI1MI2(
             cfg,
             n_task_classes=ds.n_task_classes,
@@ -638,14 +643,23 @@ def evaluate_user(
         "user_acc": user_acc,
         "uia": user_acc,
     }
-def build_model_config(ds: Dataset, model_name: str):
+def build_model_config(
+    ds: Dataset,
+    model_name: str,
+    eegnet_overrides: Dict[str, Any] | None = None,
+):
     model_name = model_name.strip()
 
     if model_name == "EEGNet":
-        return EEGNetConfig(
+        cfg = EEGNetConfig(
             n_channels=ds.n_channels,
             n_times=ds.n_times,
         )
+        if eegnet_overrides:
+            for key, value in eegnet_overrides.items():
+                if value is not None:
+                    setattr(cfg, key, value)
+        return cfg
 
     if model_name == "LMEEGNet":
         return LMEEGNetConfig(
@@ -669,6 +683,7 @@ def reset_user_head_from_fresh_model(
     user_hidden_dim: int,
     model_name: str,
     user_dropout: float,
+    eegnet_overrides: Dict[str, Any] | None,
     device: torch.device,
 ) -> None:
     fresh_model, _ = build_model(
@@ -676,8 +691,20 @@ def reset_user_head_from_fresh_model(
         user_hidden_dim=user_hidden_dim,
         model_name=model_name,
         user_dropout=user_dropout,
+        eegnet_overrides=eegnet_overrides,
     )
     model.user_head = fresh_model.user_head.to(device)
+
+
+def parse_eegnet_temporal_kernels(value: str | None) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "":
+        return None
+    if value.lower() in {"none", "classic", "single"}:
+        return ()
+    return tuple(int(v.strip()) for v in value.split(",") if v.strip())
 
 # =========================
 # 5) Main
@@ -721,6 +748,15 @@ def main():
     parser.add_argument("--user_hidden_dim", type=int, default=256)
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--user_dropout", type=float, default=0.5)
+    parser.add_argument("--task_only", action="store_true")
+    parser.add_argument("--eegnet_F1", type=int, default=None)
+    parser.add_argument("--eegnet_D", type=int, default=None)
+    parser.add_argument("--eegnet_F2", type=int, default=None)
+    parser.add_argument("--eegnet_kernel_length", type=int, default=None)
+    parser.add_argument("--eegnet_pool1", type=int, default=None)
+    parser.add_argument("--eegnet_pool2", type=int, default=None)
+    parser.add_argument("--eegnet_dropout", type=float, default=None)
+    parser.add_argument("--eegnet_temporal_kernels", type=str, default=None)
     parser.add_argument(
         "--device",
         type=str,
@@ -763,6 +799,32 @@ def main():
         default=None,
         help="Original session label held out from training/testing and reserved for large-batch DLG.",
     )
+    parser.add_argument(
+        "--task_train_session_internal",
+        type=int,
+        default=None,
+        help="Optional internal session id to use as the only Stage 1 task-training session.",
+    )
+    parser.add_argument(
+        "--task_train_session_original",
+        type=int,
+        default=None,
+        help="Optional original session label to use as the only Stage 1 task-training session.",
+    )
+    parser.add_argument(
+        "--user_train_split",
+        type=str,
+        default="task_train",
+        choices=["task_train", "test"],
+        help="Split used to train Stage 2 user head: task_train keeps legacy behavior; test uses the task test split.",
+    )
+    parser.add_argument(
+        "--user_eval_split",
+        type=str,
+        default="test",
+        choices=["task_train", "test", "holdout"],
+        help="Split used to evaluate Stage 2 user head.",
+    )
     args = parser.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
@@ -782,7 +844,17 @@ def main():
         normalize=args.normalize,
         euclidean_align=args.euclidean_align,
     )
-    model_cfg_for_run = build_model_config(ds, args.model)
+    eegnet_overrides = {
+        "F1": args.eegnet_F1,
+        "D": args.eegnet_D,
+        "F2": args.eegnet_F2,
+        "kernel_length": args.eegnet_kernel_length,
+        "pool1": args.eegnet_pool1,
+        "pool2": args.eegnet_pool2,
+        "dropout": args.eegnet_dropout,
+        "temporal_kernels": parse_eegnet_temporal_kernels(args.eegnet_temporal_kernels),
+    }
+    model_cfg_for_run = build_model_config(ds, args.model, eegnet_overrides=eegnet_overrides)
     model_cfg_dict = asdict(model_cfg_for_run)
     dlg_holdout_session_internal = resolve_session_internal(
         ds,
@@ -797,6 +869,22 @@ def main():
     )
     if dlg_holdout_session_internal is not None and ds.n_sessions < 3:
         raise ValueError("DLG holdout mode requires at least 3 sessions")
+    task_train_session_internal = resolve_session_internal(
+        ds,
+        args.task_train_session_internal,
+        args.task_train_session_original,
+        arg_name="task_train_session",
+    )
+    task_train_session_original = (
+        None
+        if task_train_session_internal is None
+        else ds.session_original_values[task_train_session_internal]
+    )
+    if (
+        task_train_session_internal is not None
+        and task_train_session_internal == dlg_holdout_session_internal
+    ):
+        raise ValueError("task_train_session and dlg_holdout_session must be different")
     user_head_cfg = {
     "hidden_dim": args.user_hidden_dim,
     "dropout": args.user_dropout,
@@ -816,6 +904,9 @@ def main():
     print(f"session labels   : {torch.unique(ds.y_session).tolist()}")
     print(f"session originals: {ds.session_original_values}")
     print(f"DLG holdout      : internal={dlg_holdout_session_internal}, original={dlg_holdout_session_original}")
+    print(f"task train fixed : internal={task_train_session_internal}, original={task_train_session_original}")
+    print(f"user train split : {args.user_train_split}")
+    print(f"user eval split  : {args.user_eval_split}")
     print()
 
     # ---- save dir ----
@@ -838,6 +929,7 @@ def main():
         "weight_decay": args.weight_decay,
         "num_workers": args.num_workers,
         "user_hidden_dim": args.user_hidden_dim,
+        "task_only": args.task_only,
         "save_every": args.save_every,
         "seeds": seeds,
         "normalize": args.normalize,
@@ -845,6 +937,10 @@ def main():
         "task_balanced_sampler": args.task_balanced_sampler,
         "dlg_holdout_session_internal": dlg_holdout_session_internal,
         "dlg_holdout_session_original": dlg_holdout_session_original,
+        "task_train_session_internal": task_train_session_internal,
+        "task_train_session_original": task_train_session_original,
+        "user_train_split": args.user_train_split,
+        "user_eval_split": args.user_eval_split,
         "model_config": model_cfg_dict,
         "user_head_config": user_head_cfg,
 
@@ -872,9 +968,14 @@ def main():
         set_seed(seed)
 
         # -------------------------------------------------
-        # LOSO over sessions
+        # LOSO over sessions, optionally restricted to one task train session.
         # -------------------------------------------------
-        for train_session_internal in range(ds.n_sessions):
+        train_session_candidates = (
+            [task_train_session_internal]
+            if task_train_session_internal is not None
+            else list(range(ds.n_sessions))
+        )
+        for train_session_internal in train_session_candidates:
             if train_session_internal == dlg_holdout_session_internal:
                 continue
             train_session_original = ds.session_original_values[train_session_internal]
@@ -911,8 +1012,15 @@ def main():
 
             train_set = Subset(ds, train_idx)
             test_set = Subset(ds, test_idx)
-            user_train_idx = train_idx
-            user_test_idx = test_idx
+            user_train_idx = test_idx if args.user_train_split == "test" else train_idx
+            if args.user_eval_split == "holdout":
+                if not holdout_idx:
+                    raise ValueError("--user_eval_split holdout requires --dlg_holdout_session_*")
+                user_test_idx = holdout_idx
+            elif args.user_eval_split == "task_train":
+                user_test_idx = train_idx
+            else:
+                user_test_idx = test_idx
             user_train_set = Subset(ds, user_train_idx)
             user_test_set = Subset(ds, user_test_idx)
 
@@ -958,6 +1066,7 @@ def main():
                 user_hidden_dim=args.user_hidden_dim,
                 model_name=args.model,
                 user_dropout=args.user_dropout,
+                eegnet_overrides=eegnet_overrides,
             )
             model = model.to(device)
 
@@ -1079,6 +1188,39 @@ def main():
 
                 save_json({"task_history": task_history}, fold_dir / "task_history.json")
 
+            if args.task_only:
+                if best_task_row is None:
+                    raise RuntimeError("best_task_row is None after Stage 1")
+                fold_result = {
+                    "dataset": args.dataset,
+                    "model": args.model,
+                    "seed": seed,
+                    "train_session_internal": train_session_internal,
+                    "train_session_original": train_session_original,
+                    "test_session_internal_values": test_session_internal_values,
+                    "test_session_original_values": test_session_original_values,
+                    "dlg_holdout_session_internal": dlg_holdout_session_internal,
+                    "dlg_holdout_session_original": dlg_holdout_session_original,
+                    "best_task_epoch": best_task_epoch,
+                    "best_user_epoch": None,
+                    "test_mi_acc": best_task_row["test_mi_acc"],
+                    "test_bca": best_task_row["test_bca"],
+                    "test_user_acc": None,
+                    "test_uia": None,
+                    "task_stage_best": best_task_row,
+                    "user_stage_best": None,
+                }
+                all_fold_results.append(fold_result)
+                save_json(
+                    {
+                        "fold_result": fold_result,
+                        "task_stage_best": best_task_row,
+                        "user_stage_best": None,
+                    },
+                    fold_dir / "fold_summary.json",
+                )
+                continue
+
             # =====================================================
             # Stage 2: train user classifier on fixed task backbone
             # =====================================================
@@ -1093,6 +1235,7 @@ def main():
                 user_hidden_dim=args.user_hidden_dim,
                 model_name=args.model,
                 user_dropout=args.user_dropout,
+                eegnet_overrides=eegnet_overrides,
                 device=device,
             )
 
@@ -1277,7 +1420,10 @@ def main():
     print(f"Total runs: {len(all_fold_results)}")
     print()
     print(f"Mean BCA      : {final_summary['mean_test_bca'] * 100:.2f}%")
-    print(f"Mean UIA      : {final_summary['mean_test_uia'] * 100:.2f}%")
+    if final_summary["mean_test_uia"] is None:
+        print("Mean UIA      : n/a")
+    else:
+        print(f"Mean UIA      : {final_summary['mean_test_uia'] * 100:.2f}%")
     print("\nSaved:")
     print(f"  - {run_dir / 'config.json'}")
     print(f"  - {run_dir / 'final_summary.json'}")

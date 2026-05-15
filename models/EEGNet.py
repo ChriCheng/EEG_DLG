@@ -82,11 +82,22 @@ class EEGNetFeatureExtractor(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # 用多尺度分支替换原来的 first_conv
-        self.first_conv = MultiScaleTemporalConv(
-            out_channels=cfg.F1,
-            kernels=cfg.temporal_kernels,
-        )
+        if cfg.temporal_kernels:
+            self.first_conv = MultiScaleTemporalConv(
+                out_channels=cfg.F1,
+                kernels=cfg.temporal_kernels,
+            )
+        else:
+            self.first_conv = nn.Sequential(
+                nn.Conv2d(
+                    in_channels=1,
+                    out_channels=cfg.F1,
+                    kernel_size=(1, cfg.kernel_length),
+                    padding=(0, cfg.kernel_length // 2),
+                    bias=False,
+                ),
+                nn.BatchNorm2d(cfg.F1),
+            )
 
         self.depthwise_conv = nn.Sequential(
             nn.Conv2d(

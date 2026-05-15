@@ -427,13 +427,38 @@ def download_mi2_bci2a(
         X, y, metadata = paradigm.get_data(dataset=dataset, subjects=[subj])
         y = np.asarray(y).reshape(-1)
 
+        label_map = {
+            "left_hand": 0,
+            "right_hand": 1,
+            "feet": 2,
+            "tongue": 3,
+        }
+        y = np.array([label_map[str(v)] for v in y], dtype=np.int64)
+
+        if "session" not in metadata.columns:
+            raise RuntimeError("metadata does not contain 'session' column")
+
+        session_values = metadata["session"].astype(str)
+        session_map = {
+            value: mapped
+            for mapped, value in enumerate(sorted(session_values.unique().tolist()), start=1)
+        }
+        metadata["session"] = session_values.map(session_map).astype(np.int64)
+
         print("  X:", X.shape, "y:", y.shape, "meta cols:", list(metadata.columns))
+        print(
+            "  session map:", session_map,
+            "session count:",
+            {s: int((metadata["session"].to_numpy() == s).sum()) for s in sorted(metadata["session"].unique())},
+        )
         save_subject_mat(out_file, X, y, metadata)
 
         ok, reason = validate_saved_mat(
             out_file,
+            expected_trials=576,
             expected_channels=22,
             expected_samples=expected_samples,
+            expected_labels=[0, 1, 2, 3],
         )
         if not ok:
             raise RuntimeError(f"[MI2] saved file validation failed for {out_file}: {reason}")
