@@ -524,8 +524,44 @@ def choose_plot_channel(real_x: torch.Tensor, requested_channel: int) -> int:
     return int(torch.var(real_x, dim=1).argmax().item())
 
 
-def waveform_ylim(target: np.ndarray, recons: List[np.ndarray]) -> Tuple[float, float]:
-    fixed_y_limits: Tuple[float, float] | None =  (-4, 8)
+
+
+
+def hide_endpoint_tick_marks(ax, axis_name: str, endpoints: Tuple[float, float]) -> None:
+    axis = ax.xaxis if axis_name == "x" else ax.yaxis
+    tick_values = ax.get_xticks() if axis_name == "x" else ax.get_yticks()
+    for tick, value in zip(axis.get_major_ticks(), tick_values):
+        if any(math.isclose(float(value), endpoint, rel_tol=1e-9, abs_tol=1e-9) for endpoint in endpoints):
+            tick.tick1line.set_markersize(0)
+            tick.tick2line.set_markersize(0)
+
+
+def waveform_axis_profile(dataset_name: str | None, trial_laplace_epsilon: float) -> str:
+    dataset_key = (dataset_name or "").upper()
+
+    # Keep epsilon-specific plotting rules centralized here so future cases
+    # (for example MI2_DLG with eps=10 / eps=50) can be added without
+    # scattering conditionals through the drawing code below.
+    if dataset_key == "MI2_DLG" and math.isclose(trial_laplace_epsilon, 0.0, abs_tol=1e-12):
+        return "mi2_dlg_eps0"
+    if dataset_key == "MI2_DLG" and math.isclose(trial_laplace_epsilon, 50.0, abs_tol=1e-12):
+        return "mi2_dlg_eps50"
+    if dataset_key == "P300":
+        return "p300"
+    return "default"
+
+def waveform_ylim(
+    target: np.ndarray,
+    recons: List[np.ndarray],
+    profile: str = "default",
+) -> Tuple[float, float]:
+    fixed_y_limits_by_profile: Dict[str, Tuple[float, float]] = {
+        # eps0 intentionally keeps the original auto-scaled behavior.
+        # Add future fixed ranges here as new epsilon profiles are introduced.
+        "mi2_dlg_eps0": (-4.0, 8.0),
+        "mi2_dlg_eps50": (-12.0, 24.0),
+    }
+    fixed_y_limits = fixed_y_limits_by_profile.get(profile)
     if fixed_y_limits is not None:
         return fixed_y_limits
 
@@ -545,23 +581,15 @@ def waveform_ylim(target: np.ndarray, recons: List[np.ndarray]) -> Tuple[float, 
     return y_min, y_max + pad * 10.0
 
 
-def hide_endpoint_tick_marks(ax, axis_name: str, endpoints: Tuple[float, float]) -> None:
-    axis = ax.xaxis if axis_name == "x" else ax.yaxis
-    tick_values = ax.get_xticks() if axis_name == "x" else ax.get_yticks()
-    for tick, value in zip(axis.get_major_ticks(), tick_values):
-        if any(math.isclose(float(value), endpoint, rel_tol=1e-9, abs_tol=1e-9) for endpoint in endpoints):
-            tick.tick1line.set_markersize(0)
-            tick.tick2line.set_markersize(0)
-
-
 def apply_waveform_axes(
     ax,
     time_ms: np.ndarray,
     y_limits: Tuple[float, float],
     dataset_name: str | None = None,
+    trial_laplace_epsilon: float = 0.0,
 ) -> None:
-    dataset_key = (dataset_name or "").upper()
-    if dataset_key == "P300" and len(time_ms) > 1:
+    profile = waveform_axis_profile(dataset_name, trial_laplace_epsilon)
+    if profile == "p300" and len(time_ms) > 1:
         x_right = float(time_ms[-1] + (time_ms[1] - time_ms[0]))
     else:
         x_right = float(time_ms[-1])
@@ -570,7 +598,9 @@ def apply_waveform_axes(
     ax.set_ylim(*y_limits)
 
     x_limits = (float(time_ms[0]), x_right)
-    if dataset_key.startswith("MI2"):
+    if profile == "mi2_dlg_eps0":
+        x_ticks = [500, 1000, 1500]
+    elif profile == "mi2_dlg_eps50":
         x_ticks = [500, 1000, 1500]
     else:
         x_ticks = [float(tick) for tick in ax.get_xticks()]
@@ -582,10 +612,14 @@ def apply_waveform_axes(
 
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     auto_y_ticks = [float(tick) for tick in ax.get_yticks()]
-    if dataset_key == "P300":
+    if profile == "p300":
         inner_y_ticks = [0, 3]
-    else:
+    elif profile == "mi2_dlg_eps0":
         inner_y_ticks = [0, 4]
+    elif profile == "mi2_dlg_eps50":
+        inner_y_ticks = [0, 12]
+    else:
+        inner_y_ticks = auto_y_ticks
     ticks = inner_y_ticks if inner_y_ticks else auto_y_ticks
     for boundary in y_limits:
         if not any(math.isclose(tick, boundary, rel_tol=1e-9, abs_tol=1e-9) for tick in ticks):
@@ -608,11 +642,13 @@ def save_waveform_trajectory(
     show_grid: bool,
     font_size: float,
     dataset_name: str,
+    trial_laplace_epsilon: float = 0.0,
 ) -> Tuple[int, List[str]]:
     channel = choose_plot_channel(clean_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
     recon_series = [snapshot["tensor"][channel].detach().cpu().numpy() for snapshot in snapshots]
-    y_limits = waveform_ylim(target, recon_series)
+    profile = waveform_axis_profile(dataset_name, trial_laplace_epsilon)
+    y_limits = waveform_ylim(target, recon_series, profile)
     time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
     cols = min(3, len(snapshots))
     rows = math.ceil(len(snapshots) / cols)
@@ -621,7 +657,7 @@ def save_waveform_trajectory(
     for ax, snapshot, recon in zip(axes.flat, snapshots, recon_series):
         ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
         ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
-        apply_waveform_axes(ax, time_ms, y_limits, dataset_name)
+        apply_waveform_axes(ax, time_ms, y_limits, dataset_name, trial_laplace_epsilon)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
         ax.set_ylabel("Amplitude ", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
@@ -641,7 +677,7 @@ def save_waveform_trajectory(
         panel_fig, panel_ax = plt.subplots(figsize=(5.2, 3.4))
         panel_ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
         panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
-        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name)
+        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name, trial_laplace_epsilon)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
         panel_ax.set_ylabel("Amplitude ", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
@@ -981,6 +1017,7 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             show_grid=args.waveform_grid,
             font_size=args.waveform_font_size,
             dataset_name=args.dataset,
+            trial_laplace_epsilon=trial_laplace_epsilon,
         )
         summary["visualization"] = {
             "plot_channel": plot_channel,
