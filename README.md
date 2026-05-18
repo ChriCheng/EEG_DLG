@@ -23,6 +23,20 @@ To ensure the repository remains lightweight and suitable for distribution, **ra
 - `run_scripts/`: reserved for experiment launch scripts  
   - `*.log` files are ignored by default.
 
+### Dataset Download
+
+Use the unified downloader to fetch any subset of the supported datasets:
+
+```bash
+python3 data/download_datasets.py --which MI1,MI2,P300
+python3 data/download_datasets.py --which MI1
+python3 data/download_datasets.py --which MI2,P300
+```
+
+By default, `P300` raw archives are downloaded to `data/P300/raw` and then
+preprocessed into the `.mat` files used by the training scripts. To only fetch
+the raw `P300` archives, add `--skip_p300_preprocess`.
+
 ### Reproducibility Recommendations
 
 For rigorous reproducibility consistent with academic practice:

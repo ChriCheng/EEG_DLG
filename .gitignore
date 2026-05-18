@@ -7,6 +7,8 @@ data/MI1_obsolete/*
 checkpoint/*
 data/p300/*
 data/*
+!data/get_data.py
+!data/download_datasets.py
 TODO
 models/__pycache__/*
 scripts/__pycache__/*

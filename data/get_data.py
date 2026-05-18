@@ -5,12 +5,22 @@ import os
 import time
 import argparse
 import random
+import subprocess
+import sys
+import zipfile
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 import numpy as np
 import scipy.io as scio
 
-from moabb.paradigms import MotorImagery
-from moabb.datasets import PhysionetMI, BNCI2014_001
+
+P300_DOWNLOAD_PAGE = (
+    "https://www.epfl.ch/labs/mmspg/research/page-58317-en-html/bci-2/bci_datasets/"
+)
+P300_SUBJECT_IDS = (1, 2, 3, 4, 6, 7, 8, 9)
 
 
 def patch_pooch_keep_progress(
@@ -223,6 +233,9 @@ def download_mi1_physionet(
     - keep only imagined left/right fist runs: original run 4, 8, 12
     - then map runs to 0, 1, 2
     """
+    from moabb.datasets import PhysionetMI
+    from moabb.paradigms import MotorImagery
+
     set_seed(seed)
 
     dataset = PhysionetMI()
@@ -386,6 +399,9 @@ def download_mi2_bci2a(
     - 9 users, 22-ch, 4 classes, 2 sessions
     MOABB: BNCI2014_001
     """
+    from moabb.datasets import BNCI2014_001
+    from moabb.paradigms import MotorImagery
+
     set_seed(seed)
 
     dataset = BNCI2014_001()
@@ -466,26 +482,154 @@ def download_mi2_bci2a(
         print(f"  Saved: {out_file}")
 
 
+class _HrefParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() != "a":
+            return
+        href = dict(attrs).get("href")
+        if href:
+            self.hrefs.append(href)
+
+
+def _fetch_p300_subject_urls() -> dict[int, str]:
+    request = Request(
+        P300_DOWNLOAD_PAGE,
+        headers={"User-Agent": "EEG_DLG dataset downloader"},
+    )
+    with urlopen(request, timeout=30) as response:
+        html = response.read().decode("utf-8", errors="replace")
+
+    parser = _HrefParser()
+    parser.feed(html)
+
+    urls: dict[int, str] = {}
+    for href in parser.hrefs:
+        name = Path(href).name.lower()
+        if not name.startswith("subject") or not name.endswith(".zip"):
+            continue
+        subject_text = name.removeprefix("subject").removesuffix(".zip")
+        if subject_text.isdigit():
+            urls[int(subject_text)] = urljoin(P300_DOWNLOAD_PAGE, href)
+
+    missing = [subject_id for subject_id in P300_SUBJECT_IDS if subject_id not in urls]
+    if missing:
+        raise RuntimeError(
+            "Could not find P300 download links for subjects "
+            f"{missing} on {P300_DOWNLOAD_PAGE}"
+        )
+    return urls
+
+
+def _download_file(url: str, output_path: Path, *, overwrite: bool = False) -> None:
+    if output_path.exists() and not overwrite:
+        if zipfile.is_zipfile(output_path):
+            print(f"[skip] P300 raw archive already exists: {output_path}")
+            return
+        print(f"[redownload] P300 bad existing archive: {output_path}")
+        output_path.unlink()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(output_path.suffix + ".part")
+    request = Request(url, headers={"User-Agent": "EEG_DLG dataset downloader"})
+    with urlopen(request, timeout=300) as response, temp_path.open("wb") as dst:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
+
+    if not zipfile.is_zipfile(temp_path):
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Downloaded file is not a valid zip archive: {url}")
+    temp_path.replace(output_path)
+    print(f"  Saved: {output_path}")
+
+
+def download_p300_epfl(
+    raw_root: str,
+    *,
+    preprocess: bool,
+    output_root: str,
+    overwrite: bool = False,
+) -> None:
+    """
+    Download EPFL/Hoffmann P300 raw subject archives and optionally preprocess them
+    into the `.mat` layout consumed by this project.
+    """
+    raw_dir = Path(raw_root)
+    output_dir = Path(output_root)
+    subject_urls = _fetch_p300_subject_urls()
+    print(f"[P300] EPFL subjects: {len(P300_SUBJECT_IDS)}")
+
+    for idx, subject_id in enumerate(P300_SUBJECT_IDS, start=1):
+        output_path = raw_dir / f"subject{subject_id}.zip"
+        print(
+            f"[P300] Downloading subject {subject_id} "
+            f"({idx}/{len(P300_SUBJECT_IDS)}) ..."
+        )
+        _download_file(subject_urls[subject_id], output_path, overwrite=overwrite)
+
+    if preprocess:
+        prepare_script = Path(__file__).with_name("prepare_p300_epfl.py")
+        print("[P300] Preprocessing raw archives ...")
+        subprocess.run(
+            [
+                sys.executable,
+                str(prepare_script),
+                "--raw_dir",
+                str(raw_dir),
+                "--output_dir",
+                str(output_dir),
+            ],
+            check=True,
+        )
+
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out_dir", type=str, default=".", help="output root dir")
-    parser.add_argument("--which", type=str, default="MI1,MI2", help="MI1, MI2, or MI1,MI2")
+    parser = argparse.ArgumentParser(
+        description="Download selected EEG_DLG datasets."
+    )
+    parser.add_argument("--out_dir", type=str, default="data", help="output root dir")
+    parser.add_argument(
+        "--which",
+        type=str,
+        default="MI1,MI2,P300",
+        help="Comma-separated datasets to download: MI1, MI2, P300",
+    )
     parser.add_argument("--resample", type=int, default=128)
     parser.add_argument("--fmin", type=float, default=4.0)
     parser.add_argument("--fmax", type=float, default=40.0)
     parser.add_argument("--tmin", type=float, default=0.5)
     parser.add_argument("--tmax", type=float, default=2.5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--skip_p300_preprocess",
+        action="store_true",
+        help="Only download P300 raw zip files; do not create processed .mat files.",
+    )
+    parser.add_argument(
+        "--overwrite_p300_raw",
+        action="store_true",
+        help="Re-download P300 raw zip files even when valid local archives exist.",
+    )
     args = parser.parse_args()
 
-    patch_pooch_keep_progress(
-        max_tries=25,
-        backoff_base=1.6,
-        timeout=(10, 300),
-        verify_tls=True,
-    )
-
     which = [w.strip().upper() for w in args.which.split(",") if w.strip()]
+    invalid = sorted(set(which) - {"MI1", "MI2", "P300"})
+    if invalid:
+        parser.error(f"Unsupported dataset name(s): {', '.join(invalid)}")
+
+    if {"MI1", "MI2"} & set(which):
+        patch_pooch_keep_progress(
+            max_tries=25,
+            backoff_base=1.6,
+            timeout=(10, 300),
+            verify_tls=True,
+        )
 
     if "MI1" in which:
         download_mi1_physionet(
@@ -507,6 +651,14 @@ def main():
             tmin=args.tmin,
             tmax=args.tmax,
             seed=args.seed,
+        )
+
+    if "P300" in which:
+        download_p300_epfl(
+            raw_root=os.path.join(args.out_dir, "P300", "raw"),
+            output_root=os.path.join(args.out_dir, "P300"),
+            preprocess=not args.skip_p300_preprocess,
+            overwrite=args.overwrite_p300_raw,
         )
 
     print("\nDone.")
