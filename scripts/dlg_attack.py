@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import json
 import math
@@ -17,7 +16,7 @@ from scripts.train import build_dataset, build_loso_split, build_model
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
-from matplotlib.ticker import FixedLocator, MaxNLocator
+from matplotlib.ticker import FixedLocator, FormatStrFormatter, MaxNLocator
 
 
 class LinearEEGModel(nn.Module):
@@ -526,6 +525,10 @@ def choose_plot_channel(real_x: torch.Tensor, requested_channel: int) -> int:
 
 
 def waveform_ylim(target: np.ndarray, recons: List[np.ndarray]) -> Tuple[float, float]:
+    fixed_y_limits: Tuple[float, float] | None =  (-4, 8)
+    if fixed_y_limits is not None:
+        return fixed_y_limits
+
     values = [target.reshape(-1)] + [recon.reshape(-1) for recon in recons]
     all_values = np.concatenate(values)
     finite_values = all_values[np.isfinite(all_values)]
@@ -537,25 +540,62 @@ def waveform_ylim(target: np.ndarray, recons: List[np.ndarray]) -> Tuple[float, 
         pad = max(abs(y_min) * 0.05, 1e-3)
     else:
         pad = (y_max - y_min) * 0.08
-    return y_min - pad, y_max + pad
+    # Keep the current visual headroom, while endpoint tick labels are handled
+    # separately by apply_waveform_axes().
+    return y_min, y_max + pad * 10.0
 
 
-def parse_float_list(value: str) -> List[float]:
-    if not value:
-        return []
-    return [float(item.strip()) for item in value.split(",") if item.strip()]
+def hide_endpoint_tick_marks(ax, axis_name: str, endpoints: Tuple[float, float]) -> None:
+    axis = ax.xaxis if axis_name == "x" else ax.yaxis
+    tick_values = ax.get_xticks() if axis_name == "x" else ax.get_yticks()
+    for tick, value in zip(axis.get_major_ticks(), tick_values):
+        if any(math.isclose(float(value), endpoint, rel_tol=1e-9, abs_tol=1e-9) for endpoint in endpoints):
+            tick.tick1line.set_markersize(0)
+            tick.tick2line.set_markersize(0)
 
 
-def hide_waveform_yticks(ax, hidden_yticks: List[float]) -> None:
-    if not hidden_yticks:
-        return
+def apply_waveform_axes(
+    ax,
+    time_ms: np.ndarray,
+    y_limits: Tuple[float, float],
+    dataset_name: str | None = None,
+) -> None:
+    dataset_key = (dataset_name or "").upper()
+    if dataset_key == "P300" and len(time_ms) > 1:
+        x_right = float(time_ms[-1] + (time_ms[1] - time_ms[0]))
+    else:
+        x_right = float(time_ms[-1])
+    ax.set_xlim(float(time_ms[0]), x_right)
+    ax.margins(x=0)
+    ax.set_ylim(*y_limits)
+
+    x_limits = (float(time_ms[0]), x_right)
+    if dataset_key.startswith("MI2"):
+        x_ticks = [500, 1000, 1500]
+    else:
+        x_ticks = [float(tick) for tick in ax.get_xticks()]
+    for boundary in x_limits:
+        if not any(math.isclose(tick, boundary, rel_tol=1e-9, abs_tol=1e-9) for tick in x_ticks):
+            x_ticks.append(boundary)
+    x_ticks = sorted(tick for tick in x_ticks if x_limits[0] <= tick <= x_limits[1])
+    ax.xaxis.set_major_locator(FixedLocator(x_ticks))
+
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
-    ticks = [
-        float(tick)
-        for tick in ax.get_yticks()
-        if not any(math.isclose(float(tick), hidden, rel_tol=1e-9, abs_tol=1e-9) for hidden in hidden_yticks)
-    ]
+    auto_y_ticks = [float(tick) for tick in ax.get_yticks()]
+    if dataset_key == "P300":
+        inner_y_ticks = [0, 3]
+    else:
+        inner_y_ticks = [0, 4]
+    ticks = inner_y_ticks if inner_y_ticks else auto_y_ticks
+    for boundary in y_limits:
+        if not any(math.isclose(tick, boundary, rel_tol=1e-9, abs_tol=1e-9) for tick in ticks):
+            ticks.append(float(boundary))
+    ticks = sorted(ticks)
+    ticks = [tick for tick in ticks if y_limits[0] <= tick <= y_limits[1]]
     ax.yaxis.set_major_locator(FixedLocator(ticks))
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.0f"))
+    hide_endpoint_tick_marks(ax, "x", x_limits)
+    hide_endpoint_tick_marks(ax, "y", y_limits)
 
 
 def save_waveform_trajectory(
@@ -567,7 +607,7 @@ def save_waveform_trajectory(
     sfreq: float,
     show_grid: bool,
     font_size: float,
-    hidden_yticks: List[float],
+    dataset_name: str,
 ) -> Tuple[int, List[str]]:
     channel = choose_plot_channel(clean_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
@@ -581,10 +621,9 @@ def save_waveform_trajectory(
     for ax, snapshot, recon in zip(axes.flat, snapshots, recon_series):
         ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
         ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
-        ax.set_ylim(*y_limits)
+        apply_waveform_axes(ax, time_ms, y_limits, dataset_name)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
-        ax.set_ylabel("Amplitude (mV)", fontsize=font_size)
-        hide_waveform_yticks(ax, hidden_yticks)
+        ax.set_ylabel("Amplitude ", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
         legend = ax.legend(
             fontsize=max(font_size - 1.0, 6.0),
@@ -602,10 +641,9 @@ def save_waveform_trajectory(
         panel_fig, panel_ax = plt.subplots(figsize=(5.2, 3.4))
         panel_ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
         panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
-        panel_ax.set_ylim(*y_limits)
+        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
-        panel_ax.set_ylabel("Amplitude (mV)", fontsize=font_size)
-        hide_waveform_yticks(panel_ax, hidden_yticks)
+        panel_ax.set_ylabel("Amplitude ", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
         legend = panel_ax.legend(
             fontsize=max(font_size - 1.0, 6.0),
@@ -942,13 +980,12 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             sfreq=args.sfreq,
             show_grid=args.waveform_grid,
             font_size=args.waveform_font_size,
-            hidden_yticks=parse_float_list(args.waveform_hide_yticks),
+            dataset_name=args.dataset,
         )
         summary["visualization"] = {
             "plot_channel": plot_channel,
             "waveform_grid": args.waveform_grid,
             "waveform_font_size": args.waveform_font_size,
-            "waveform_hide_yticks": parse_float_list(args.waveform_hide_yticks),
             "waveform_trajectory_png": str(waveform_path),
             "waveform_panel_pngs": panel_paths,
         }
@@ -1073,12 +1110,6 @@ def main() -> None:
         type=float,
         default=10.0,
         help="Font size for waveform axis labels and tick labels.",
-    )
-    parser.add_argument(
-        "--waveform_hide_yticks",
-        type=str,
-        default="",
-        help="Comma-separated y tick labels to hide on waveform plots, e.g. '4' or '-4,4'.",
     )
     parser.add_argument("--out_dir", type=str, default="checkpoint/dlg_attack")
     parser.add_argument(

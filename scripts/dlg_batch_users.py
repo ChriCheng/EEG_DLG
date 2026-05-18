@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from scripts.dlg_attack import (
+    apply_waveform_axes,
     filter_indices_by_session,
     resolve_eval_session_internal,
     run_dlg,
@@ -395,9 +396,9 @@ def plot_waveform_grid(
         recon = item["recon"]
         ax.plot(time_ms, target, linewidth=1.5, color="#111111", label="Target")
         ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
-        ax.set_ylim(*y_limits)
+        apply_waveform_axes(ax, time_ms, y_limits, dataset_name=args.dataset)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
-        ax.set_ylabel("Amplitude (mV)", fontsize=font_size)
+        ax.set_ylabel("Amplitude ", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
         legend = ax.legend(
             fontsize=max(font_size - 1.0, 6.0),
@@ -414,9 +415,9 @@ def plot_waveform_grid(
         panel_fig, panel_ax = plt.subplots(figsize=(4.8, 3.0))
         panel_ax.plot(time_ms, target, linewidth=1.5, color="#111111", label="Target")
         panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
-        panel_ax.set_ylim(*y_limits)
+        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name=args.dataset)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
-        panel_ax.set_ylabel("Amplitude (mV)", fontsize=font_size)
+        panel_ax.set_ylabel("Amplitude ", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
         legend = panel_ax.legend(
             fontsize=max(font_size - 1.0, 6.0),

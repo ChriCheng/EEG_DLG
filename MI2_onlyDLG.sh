@@ -18,41 +18,37 @@ seed="0"
 train_session=""
 eval_session="3"
 split="all"
-indices=""
+indices="221"
 batch_size="1"
 
 attack_head="task"
 label_mode="idlg"
-iters="50"
+iters="30"
 lr="1.0"
 optimizer="lbfgs"
 lbfgs_max_iter="20"
 lbfgs_line_search="strong_wolfe"
 grad_loss_scale="1"
-log_every="5"
+log_every="3"
 topk="3"
 
 # P300_DLG_EEGNet.sh 同款 trial-level Laplace 噪声机制。
 # epsilon=0 表示不加噪；epsilon>0 时噪声 scale=sensitivity/epsilon。
 # 支持临时覆盖，例如：
 #   epsilon=10 trial_laplace_sensitivity=1.0 ./MI2_onlyDLG.sh
-epsilon="${epsilon:-0}"
+epsilon="${epsilon:-50}"
 trial_laplace_sensitivity="${trial_laplace_sensitivity:-1.0}"
 
 dummy_init_scale="auto"
 
-plot_channel="-1"
+plot_channel="0"
 sfreq="128"
 waveform_grid="0"
 waveform_font_size="16"
-# 手动隐藏波形图 y 轴刻度标签，逗号分隔；留空表示完全使用默认刻度。
-# 例如：waveform_hide_yticks="4" 或 waveform_hide_yticks="-4,4"
-# waveform_hide_yticks="4"
-waveform_hide_yticks="${waveform_hide_yticks:-}"
 
 normalize="channel"
 euclidean_align="1"
-device="cuda"
+device="cpu"
 user_hidden_dim="256"
 user_dropout="0.5"
 out_dir=""
@@ -114,9 +110,6 @@ fi
 if [[ "$waveform_grid" == "0" || "$waveform_grid" == "false" || "$waveform_grid" == "False" || "$waveform_grid" == "off" || "$waveform_grid" == "no" ]]; then
   extra_args+=(--no-waveform_grid)
 fi
-if [[ -n "$waveform_hide_yticks" ]]; then
-  extra_args+=(--waveform_hide_yticks "$waveform_hide_yticks")
-fi
 
 echo
 echo "================================================================================"
@@ -126,7 +119,6 @@ echo "[MI2_onlyDLG] attack_head=$attack_head label_mode=$label_mode iters=$iters
 echo "[MI2_onlyDLG] lbfgs_max_iter=$lbfgs_max_iter lbfgs_line_search=$lbfgs_line_search"
 echo "[MI2_onlyDLG] epsilon=$epsilon sensitivity=$trial_laplace_sensitivity"
 echo "[MI2_onlyDLG] grad_loss_scale=$grad_loss_scale"
-echo "[MI2_onlyDLG] waveform_hide_yticks=${waveform_hide_yticks:-none}"
 echo "[MI2_onlyDLG] normalize=$normalize euclidean_align=$euclidean_align dummy_init_scale=$dummy_init_scale device=$device"
 echo "[MI2_onlyDLG] out_dir=$out_dir"
 echo "================================================================================"

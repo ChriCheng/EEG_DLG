@@ -30,7 +30,7 @@ task_balanced_sampler="0"
 eegnet_F1="8"
 eegnet_D="2"
 eegnet_F2="16"
-eegnet_dropout="0.5"
+eegnet_dropout="0"
 eegnet_temporal_kernels="none"
 run_name="mi2_classic_ea_lr2e3_60ep_leave1"
 
