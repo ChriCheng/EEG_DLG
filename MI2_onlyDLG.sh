@@ -36,7 +36,7 @@ topk="3"
 # epsilon=0 表示不加噪；epsilon>0 时噪声 scale=sensitivity/epsilon。
 # 支持临时覆盖，例如：
 #   epsilon=10 trial_laplace_sensitivity=1.0 ./MI2_onlyDLG.sh
-epsilon="${epsilon:-50}"
+epsilon="${epsilon:-0}"
 trial_laplace_sensitivity="${trial_laplace_sensitivity:-1.0}"
 
 dummy_init_scale="auto"

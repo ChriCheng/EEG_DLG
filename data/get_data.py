@@ -5,12 +5,13 @@ import os
 import time
 import argparse
 import random
+import shutil
 import subprocess
 import sys
 import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -21,6 +22,57 @@ P300_DOWNLOAD_PAGE = (
     "https://www.epfl.ch/labs/mmspg/research/page-58317-en-html/bci-2/bci_datasets/"
 )
 P300_SUBJECT_IDS = (1, 2, 3, 4, 6, 7, 8, 9)
+
+
+def _curl_available() -> bool:
+    return shutil.which("curl") is not None
+
+
+def _curl_read_text(url: str, *, timeout: int = 300) -> str:
+    result = subprocess.run(
+        [
+            "curl",
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(timeout),
+            "-A",
+            "EEG_DLG dataset downloader",
+            url,
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _curl_download_file(url: str, output_path: Path, *, timeout: int = 3600) -> None:
+    cmd = [
+        "curl",
+        "-L",
+        "--fail",
+        "--show-error",
+        "--retry",
+        "8",
+        "--retry-all-errors",
+        "--retry-delay",
+        "10",
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        str(timeout),
+        "-A",
+        "EEG_DLG dataset downloader",
+        "-o",
+        str(output_path),
+    ]
+    if urlparse(url).hostname == "documents.epfl.ch":
+        cmd.extend(["--noproxy", "documents.epfl.ch"])
+    cmd.append(url)
+    subprocess.run(cmd, check=True)
 
 
 def patch_pooch_keep_progress(
@@ -496,12 +548,15 @@ class _HrefParser(HTMLParser):
 
 
 def _fetch_p300_subject_urls() -> dict[int, str]:
-    request = Request(
-        P300_DOWNLOAD_PAGE,
-        headers={"User-Agent": "EEG_DLG dataset downloader"},
-    )
-    with urlopen(request, timeout=30) as response:
-        html = response.read().decode("utf-8", errors="replace")
+    if _curl_available():
+        html = _curl_read_text(P300_DOWNLOAD_PAGE, timeout=300)
+    else:
+        request = Request(
+            P300_DOWNLOAD_PAGE,
+            headers={"User-Agent": "EEG_DLG dataset downloader"},
+        )
+        with urlopen(request, timeout=30) as response:
+            html = response.read().decode("utf-8", errors="replace")
 
     parser = _HrefParser()
     parser.feed(html)
@@ -534,13 +589,16 @@ def _download_file(url: str, output_path: Path, *, overwrite: bool = False) -> N
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(output_path.suffix + ".part")
-    request = Request(url, headers={"User-Agent": "EEG_DLG dataset downloader"})
-    with urlopen(request, timeout=300) as response, temp_path.open("wb") as dst:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            dst.write(chunk)
+    if _curl_available():
+        _curl_download_file(url, temp_path, timeout=3600)
+    else:
+        request = Request(url, headers={"User-Agent": "EEG_DLG dataset downloader"})
+        with urlopen(request, timeout=300) as response, temp_path.open("wb") as dst:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
 
     if not zipfile.is_zipfile(temp_path):
         temp_path.unlink(missing_ok=True)
