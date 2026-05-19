@@ -15,9 +15,11 @@ import numpy as np
 import torch
 
 from scripts.dlg_attack import (
+    apply_time_window,
     apply_waveform_axes,
     filter_indices_by_session,
     resolve_eval_session_internal,
+    resolve_plot_xlim_ms,
     run_dlg,
     save_text,
     waveform_ylim,
@@ -351,6 +353,9 @@ def plot_waveform_grid(
     sfreq: float,
     show_grid: bool,
     font_size: float,
+    dataset_name: str,
+    plot_xmin_ms: float | None = None,
+    plot_xmax_ms: float | None = None,
 ) -> str:
     cols = min(4, len(rows))
     rows_n = math.ceil(len(rows) / cols)
@@ -369,6 +374,7 @@ def plot_waveform_grid(
         recon_x = payload["recon_x"][0]
         channel = choose_channel(clean_x, plot_channel)
         time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
+        plot_xlim_ms = resolve_plot_xlim_ms(time_ms, plot_xmin_ms, plot_xmax_ms)
 
         target = real_x[channel].numpy()
         recon = recon_x[channel].numpy()
@@ -376,6 +382,7 @@ def plot_waveform_grid(
             {
                 "row": row,
                 "time_ms": time_ms,
+                "plot_xlim_ms": plot_xlim_ms,
                 "target": target,
                 "recon": recon,
             }
@@ -383,8 +390,10 @@ def plot_waveform_grid(
 
     if plot_items:
         y_limits = waveform_ylim(
-            np.concatenate([item["target"] for item in plot_items]),
-            [item["recon"] for item in plot_items],
+            np.concatenate(
+                [apply_time_window(item["target"], item["time_ms"], item["plot_xlim_ms"]) for item in plot_items]
+            ),
+            [apply_time_window(item["recon"], item["time_ms"], item["plot_xlim_ms"]) for item in plot_items],
         )
     else:
         y_limits = (-1.0, 1.0)
@@ -392,11 +401,12 @@ def plot_waveform_grid(
     for ax, item in zip(axes.flat, plot_items):
         row = item["row"]
         time_ms = item["time_ms"]
+        plot_xlim_ms = item["plot_xlim_ms"]
         target = item["target"]
         recon = item["recon"]
         ax.plot(time_ms, target, linewidth=1.5, color="#111111", label="Target")
         ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
-        apply_waveform_axes(ax, time_ms, y_limits, dataset_name=args.dataset)
+        apply_waveform_axes(ax, time_ms, y_limits, dataset_name=dataset_name, plot_xlim_ms=plot_xlim_ms)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
         ax.set_ylabel("Amplitude ", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
@@ -415,7 +425,7 @@ def plot_waveform_grid(
         panel_fig, panel_ax = plt.subplots(figsize=(4.8, 3.0))
         panel_ax.plot(time_ms, target, linewidth=1.5, color="#111111", label="Target")
         panel_ax.plot(time_ms, recon, linewidth=1.1, color="#d95f02", alpha=0.9, label="Reconstruction")
-        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name=args.dataset)
+        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name=dataset_name, plot_xlim_ms=plot_xlim_ms)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
         panel_ax.set_ylabel("Amplitude ", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
@@ -571,6 +581,18 @@ def main() -> None:
     parser.add_argument("--plot_channel", type=int, default=-1)
     parser.add_argument("--sfreq", type=float, default=128.0)
     parser.add_argument(
+        "--plot_xmin_ms",
+        type=float,
+        default=None,
+        help="Left x-axis limit for waveform plots in milliseconds; omit to use the first sample.",
+    )
+    parser.add_argument(
+        "--plot_xmax_ms",
+        type=float,
+        default=None,
+        help="Right x-axis limit for waveform plots in milliseconds; omit to use the last sample.",
+    )
+    parser.add_argument(
         "--waveform_grid",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -705,6 +727,9 @@ def main() -> None:
                 args.sfreq,
                 args.waveform_grid,
                 args.waveform_font_size,
+                args.dataset,
+                args.plot_xmin_ms,
+                args.plot_xmax_ms,
             ),
             "quality_bars": plot_quality_bars(rows, out_dir),
             "identity_leakage_bars": plot_leakage_bars(rows, out_dir, args.topk),

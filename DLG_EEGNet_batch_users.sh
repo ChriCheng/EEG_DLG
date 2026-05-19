@@ -34,6 +34,8 @@ skip_figures="1"
 keep_trial_artifacts="0"
 plot_channel="-1"
 sfreq="128"
+plot_xmin_ms="${plot_xmin_ms:-}"
+plot_xmax_ms="${plot_xmax_ms:-}"
 waveform_grid="1"
 waveform_font_size="10"
 
@@ -94,6 +96,12 @@ fi
 if [[ "$waveform_grid" == "0" || "$waveform_grid" == "false" || "$waveform_grid" == "False" || "$waveform_grid" == "off" || "$waveform_grid" == "no" ]]; then
   extra_args+=(--no-waveform_grid)
 fi
+if [[ -n "$plot_xmin_ms" ]]; then
+  extra_args+=(--plot_xmin_ms "$plot_xmin_ms")
+fi
+if [[ -n "$plot_xmax_ms" ]]; then
+  extra_args+=(--plot_xmax_ms "$plot_xmax_ms")
+fi
 
 echo
 echo "================================================================================"
@@ -102,6 +110,7 @@ echo "[DLG_EEGNet_batch_users] split=$split eval_session=${eval_session:-all} se
 echo "[DLG_EEGNet_batch_users] attack_head=$attack_head label_mode=$label_mode iters=$iters lr=$lr optimizer=$optimizer"
 echo "[DLG_EEGNet_batch_users] epsilon=$epsilon sensitivity=$trial_laplace_sensitivity"
 echo "[DLG_EEGNet_batch_users] skip_figures=$skip_figures keep_trial_artifacts=$keep_trial_artifacts"
+echo "[DLG_EEGNet_batch_users] plot_channel=$plot_channel plot_xmin_ms=${plot_xmin_ms:-auto} plot_xmax_ms=${plot_xmax_ms:-auto}"
 echo "[DLG_EEGNet_batch_users] out_dir=$out_dir"
 echo "================================================================================"
 

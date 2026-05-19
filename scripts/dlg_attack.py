@@ -559,7 +559,7 @@ def waveform_ylim(
         # eps0 intentionally keeps the original auto-scaled behavior.
         # Add future fixed ranges here as new epsilon profiles are introduced.
         "mi2_dlg_eps0": (-4.0, 8.0),
-        "mi2_dlg_eps50": (-12.0, 24.0),
+        "mi2_dlg_eps50": (-6.0, 12.0),
     }
     fixed_y_limits = fixed_y_limits_by_profile.get(profile)
     if fixed_y_limits is not None:
@@ -581,27 +581,63 @@ def waveform_ylim(
     return y_min, y_max + pad * 10.0
 
 
+def resolve_plot_xlim_ms(
+    time_ms: np.ndarray,
+    xmin_ms: float | None = None,
+    xmax_ms: float | None = None,
+) -> Tuple[float, float] | None:
+    if xmin_ms is None and xmax_ms is None:
+        return None
+    if time_ms.size == 0:
+        raise ValueError("Cannot apply a plot time window to an empty time axis")
+    left = float(time_ms[0]) if xmin_ms is None else float(xmin_ms)
+    right = float(time_ms[-1]) if xmax_ms is None else float(xmax_ms)
+    if right <= left:
+        raise ValueError(
+            f"Invalid plot time window: left={left:g} ms must be smaller than right={right:g} ms"
+        )
+    if not np.any((time_ms >= left) & (time_ms <= right)):
+        raise ValueError(
+            f"Plot time window {left:g}-{right:g} ms does not overlap waveform range "
+            f"{float(time_ms[0]):g}-{float(time_ms[-1]):g} ms"
+        )
+    return left, right
+
+
+def apply_time_window(values: np.ndarray, time_ms: np.ndarray, x_limits: Tuple[float, float] | None) -> np.ndarray:
+    if x_limits is None:
+        return values
+    left, right = x_limits
+    mask = (time_ms >= left) & (time_ms <= right)
+    return values[mask]
+
+
 def apply_waveform_axes(
     ax,
     time_ms: np.ndarray,
     y_limits: Tuple[float, float],
     dataset_name: str | None = None,
     trial_laplace_epsilon: float = 0.0,
+    plot_xlim_ms: Tuple[float, float] | None = None,
 ) -> None:
     profile = waveform_axis_profile(dataset_name, trial_laplace_epsilon)
-    if profile == "p300" and len(time_ms) > 1:
+    if plot_xlim_ms is not None:
+        x_left, x_right = plot_xlim_ms
+    elif profile == "p300" and len(time_ms) > 1:
+        x_left = float(time_ms[0])
         x_right = float(time_ms[-1] + (time_ms[1] - time_ms[0]))
     else:
+        x_left = float(time_ms[0])
         x_right = float(time_ms[-1])
-    ax.set_xlim(float(time_ms[0]), x_right)
+    ax.set_xlim(x_left, x_right)
     ax.margins(x=0)
     ax.set_ylim(*y_limits)
 
-    x_limits = (float(time_ms[0]), x_right)
+    x_limits = (x_left, x_right)
     if profile == "mi2_dlg_eps0":
-        x_ticks = [500, 1000, 1500]
+        x_ticks = [250]
     elif profile == "mi2_dlg_eps50":
-        x_ticks = [500, 1000, 1500]
+        x_ticks = [250]
     else:
         x_ticks = [float(tick) for tick in ax.get_xticks()]
     for boundary in x_limits:
@@ -617,7 +653,7 @@ def apply_waveform_axes(
     elif profile == "mi2_dlg_eps0":
         inner_y_ticks = [0, 4]
     elif profile == "mi2_dlg_eps50":
-        inner_y_ticks = [0, 12]
+        inner_y_ticks = [0, 6]
     else:
         inner_y_ticks = auto_y_ticks
     ticks = inner_y_ticks if inner_y_ticks else auto_y_ticks
@@ -643,13 +679,22 @@ def save_waveform_trajectory(
     font_size: float,
     dataset_name: str,
     trial_laplace_epsilon: float = 0.0,
+    plot_xmin_ms: float | None = 0,
+    plot_xmax_ms: float | None = 1000,
 ) -> Tuple[int, List[str]]:
     channel = choose_plot_channel(clean_x, plot_channel)
     target = real_x[channel].detach().cpu().numpy()
     recon_series = [snapshot["tensor"][channel].detach().cpu().numpy() for snapshot in snapshots]
     profile = waveform_axis_profile(dataset_name, trial_laplace_epsilon)
-    y_limits = waveform_ylim(target, recon_series, profile)
     time_ms = np.arange(real_x.shape[1], dtype=np.float32) / float(sfreq) * 1000.0
+    plot_xlim_ms = resolve_plot_xlim_ms(time_ms, plot_xmin_ms, plot_xmax_ms)
+    # y_profile = "default" if plot_xlim_ms is not None else profile
+    y_profile =  profile
+    y_limits = waveform_ylim(
+        apply_time_window(target, time_ms, plot_xlim_ms),
+        [apply_time_window(recon, time_ms, plot_xlim_ms) for recon in recon_series],
+        y_profile,
+    )
     cols = min(3, len(snapshots))
     rows = math.ceil(len(snapshots) / cols)
     fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 3.4 * rows), squeeze=False)
@@ -657,7 +702,7 @@ def save_waveform_trajectory(
     for ax, snapshot, recon in zip(axes.flat, snapshots, recon_series):
         ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
         ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
-        apply_waveform_axes(ax, time_ms, y_limits, dataset_name, trial_laplace_epsilon)
+        apply_waveform_axes(ax, time_ms, y_limits, dataset_name, trial_laplace_epsilon, plot_xlim_ms)
         ax.set_xlabel("Time (ms)", fontsize=font_size)
         ax.set_ylabel("Amplitude ", fontsize=font_size)
         ax.tick_params(axis="both", labelsize=font_size)
@@ -677,7 +722,7 @@ def save_waveform_trajectory(
         panel_fig, panel_ax = plt.subplots(figsize=(5.2, 3.4))
         panel_ax.plot(time_ms, target, linewidth=1.7, color="#111111", label="Target")
         panel_ax.plot(time_ms, recon, linewidth=1.3, color="#d95f02", alpha=0.92, label="Reconstruction")
-        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name, trial_laplace_epsilon)
+        apply_waveform_axes(panel_ax, time_ms, y_limits, dataset_name, trial_laplace_epsilon, plot_xlim_ms)
         panel_ax.set_xlabel("Time (ms)", fontsize=font_size)
         panel_ax.set_ylabel("Amplitude ", fontsize=font_size)
         panel_ax.tick_params(axis="both", labelsize=font_size)
@@ -1018,11 +1063,15 @@ def run_dlg(args: argparse.Namespace) -> Dict:
             font_size=args.waveform_font_size,
             dataset_name=args.dataset,
             trial_laplace_epsilon=trial_laplace_epsilon,
+            plot_xmin_ms=args.plot_xmin_ms,
+            plot_xmax_ms=args.plot_xmax_ms,
         )
         summary["visualization"] = {
             "plot_channel": plot_channel,
             "waveform_grid": args.waveform_grid,
             "waveform_font_size": args.waveform_font_size,
+            "plot_xmin_ms": args.plot_xmin_ms,
+            "plot_xmax_ms": args.plot_xmax_ms,
             "waveform_trajectory_png": str(waveform_path),
             "waveform_panel_pngs": panel_paths,
         }
@@ -1135,6 +1184,18 @@ def main() -> None:
         help="Channel index for waveform panels; -1 picks the target channel with the largest variance.",
     )
     parser.add_argument("--sfreq", type=float, default=128.0, help="Sampling rate used for waveform x-axis in ms.")
+    parser.add_argument(
+        "--plot_xmin_ms",
+        type=float,
+        default=None,
+        help="Left x-axis limit for waveform plots in milliseconds; omit to use the first sample.",
+    )
+    parser.add_argument(
+        "--plot_xmax_ms",
+        type=float,
+        default=None,
+        help="Right x-axis limit for waveform plots in milliseconds; omit to use the last sample.",
+    )
     parser.add_argument(
         "--waveform_grid",
         action=argparse.BooleanOptionalAction,

@@ -41,8 +41,12 @@ trial_laplace_sensitivity="${trial_laplace_sensitivity:-1.0}"
 
 dummy_init_scale="auto"
 
-plot_channel="0"
+plot_channel="1"
 sfreq="128"
+# 波形图手动时间窗（ms）。留空表示完整 0~约2000ms；例如 0~1000ms：
+#   plot_xmin_ms=0 plot_xmax_ms=1000 ./MI2_onlyDLG.sh
+plot_xmin_ms="${plot_xmin_ms:-}"
+plot_xmax_ms="${plot_xmax_ms:-500}"
 waveform_grid="0"
 waveform_font_size="20"
 
@@ -110,6 +114,12 @@ fi
 if [[ "$waveform_grid" == "0" || "$waveform_grid" == "false" || "$waveform_grid" == "False" || "$waveform_grid" == "off" || "$waveform_grid" == "no" ]]; then
   extra_args+=(--no-waveform_grid)
 fi
+if [[ -n "$plot_xmin_ms" ]]; then
+  extra_args+=(--plot_xmin_ms "$plot_xmin_ms")
+fi
+if [[ -n "$plot_xmax_ms" ]]; then
+  extra_args+=(--plot_xmax_ms "$plot_xmax_ms")
+fi
 
 echo
 echo "================================================================================"
@@ -120,6 +130,7 @@ echo "[MI2_onlyDLG] lbfgs_max_iter=$lbfgs_max_iter lbfgs_line_search=$lbfgs_line
 echo "[MI2_onlyDLG] epsilon=$epsilon sensitivity=$trial_laplace_sensitivity"
 echo "[MI2_onlyDLG] grad_loss_scale=$grad_loss_scale"
 echo "[MI2_onlyDLG] normalize=$normalize euclidean_align=$euclidean_align dummy_init_scale=$dummy_init_scale device=$device"
+echo "[MI2_onlyDLG] plot_channel=$plot_channel plot_xmin_ms=${plot_xmin_ms:-auto} plot_xmax_ms=${plot_xmax_ms:-auto}"
 echo "[MI2_onlyDLG] out_dir=$out_dir"
 echo "================================================================================"
 
